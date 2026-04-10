@@ -1,0 +1,4 @@
+from model.hybrid.pipeline import HybridProcessor, create_default_hybrid_processor
+
+__all__ = ["HybridProcessor", "create_default_hybrid_processor"]
+

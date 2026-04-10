@@ -11,6 +11,7 @@ import os
 from model.document_parser import DocumentParser
 from model.format_checker import FormatChecker
 from model.format_modifier import FormatModifier
+from model import create_default_hybrid_processor
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -46,6 +47,7 @@ class MainWindow(QMainWindow):
         self.parser = DocumentParser()
         self.checker = FormatChecker()
         self.modifier = FormatModifier()
+        self.hybrid_processor = create_default_hybrid_processor()
         
         # 创建主窗口部件
         self.main_widget = QWidget()
@@ -573,12 +575,16 @@ class MainWindow(QMainWindow):
 
         self.order_check_btn = QPushButton("检查排版顺序")
         self.order_check_btn.clicked.connect(self.check_order)
+
+        self.hybrid_check_btn = QPushButton("混合检查")
+        self.hybrid_check_btn.clicked.connect(self.hybrid_check)
         
         self.modify_btn = QPushButton("确认修改")
         self.modify_btn.clicked.connect(self.modify_format)
         
         button_layout.addWidget(self.check_btn)
         button_layout.addWidget(self.order_check_btn)
+        button_layout.addWidget(self.hybrid_check_btn)
         button_layout.addWidget(self.modify_btn)
         
         self.main_layout.addLayout(button_layout)
@@ -665,6 +671,32 @@ class MainWindow(QMainWindow):
         
         # 检查排版顺序
         self.parser.check_order()
+
+    def hybrid_check(self):
+        """执行混合检查（docx + pdf + ocr占位）"""
+        if not self.file_path_label.text() or self.file_path_label.text() == "未选择文件":
+            QMessageBox.warning(
+                self,
+                "提示",
+                "未选择文件，请选择Word文档",
+                QMessageBox.StandardButton.Ok
+            )
+            return
+
+        try:
+            user_formats = self.get_format_settings()
+            result = self.hybrid_processor.process(
+                self.file_path_label.text(),
+                user_formats=user_formats
+            )
+            self.display_hybrid_results(result)
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "错误",
+                f"混合检查失败：\n{str(e)}",
+                QMessageBox.StandardButton.Ok
+            )
         
     def modify_format(self):
         """修改格式"""
@@ -762,6 +794,59 @@ class MainWindow(QMainWindow):
             
             section_widget.setLayout(section_layout)
             self.result_layout.addWidget(section_widget)
+
+    def display_hybrid_results(self, result):
+        """显示混合检查结果"""
+        while self.result_layout.count():
+            item = self.result_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        summary = result.get("summary", {})
+        engine_counts = result.get("engine_counts", {})
+        context_status = result.get("context_status", {})
+        issues = result.get("issues", [])
+
+        overview_widget = QGroupBox("检查概览")
+        overview_layout = QFormLayout()
+        overview_text = (
+            f"总问题数：{summary.get('total', 0)}\n"
+            f"错误：{summary.get('errors', 0)}，警告：{summary.get('warnings', 0)}，提示：{summary.get('infos', 0)}\n"
+            f"各引擎问题数：{engine_counts}\n"
+            f"上下文状态：{context_status}"
+        )
+        overview_label = QLabel(overview_text)
+        overview_label.setWordWrap(True)
+        overview_layout.addRow(overview_label)
+        overview_widget.setLayout(overview_layout)
+        self.result_layout.addWidget(overview_widget)
+
+        if not issues:
+            no_issue_label = QLabel("✓ 未发现格式问题")
+            no_issue_label.setStyleSheet("color: green; font-weight: bold; font-size: 14px;")
+            no_issue_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.result_layout.addWidget(no_issue_label)
+            return
+
+        grouped = {}
+        for issue in issues:
+            source = issue.get("source", "unknown")
+            grouped.setdefault(source, []).append(issue)
+
+        for source, source_issues in grouped.items():
+            source_widget = QGroupBox(f"{source} 检查结果")
+            source_layout = QFormLayout()
+            lines = []
+            for issue in source_issues:
+                lines.append(
+                    f"[{issue.get('severity', 'info')}] {issue.get('title', '')}: "
+                    f"{issue.get('message', '')}"
+                )
+            content_label = QLabel("\n".join(lines))
+            content_label.setWordWrap(True)
+            source_layout.addRow(content_label)
+            source_widget.setLayout(source_layout)
+            self.result_layout.addWidget(source_widget)
             
     def get_section_name(self, section_key):
         """根据section键获取中文名称"""

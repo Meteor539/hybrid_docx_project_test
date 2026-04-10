@@ -1,1 +1,4 @@
-# 模型包初始化文件 
+from model.hybrid import HybridProcessor, create_default_hybrid_processor
+
+__all__ = ["HybridProcessor", "create_default_hybrid_processor"]
+
