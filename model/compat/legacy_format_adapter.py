@@ -74,9 +74,9 @@ class LegacyFormatAdapter:
         expected = [
             "cover",
             "statement1",
-            "statement2",
             "chinese_abstract",
             "english_abstract",
+            "catalogue",
             "main_text",
             "references",
             "acknowledgments",
@@ -101,4 +101,3 @@ class LegacyFormatAdapter:
             "parts_order": parts_order,
             "ok": (not missing and not illegal and not order_errors),
         }
-

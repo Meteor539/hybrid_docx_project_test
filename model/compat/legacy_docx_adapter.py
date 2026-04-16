@@ -34,17 +34,18 @@ class LegacyDocxAdapter:
         if not paragraphs:
             return doc, sections
 
-        # 粗粒度边界识别：声明、摘要、正文、参考文献、致谢
-        idx_statement = self._find_index(paragraphs, ["原创性声明", "使用授权"])
-        idx_cn_abs = self._find_index(paragraphs, ["摘要"])
-        idx_en_abs = self._find_index(paragraphs, ["abstract"], lower=True)
+        # 粗粒度边界识别：声明、摘要、目录、正文、参考文献、致谢
+        idx_statement = self._find_statement_index(paragraphs)
+        idx_cn_abs = self._find_exact_heading_index(paragraphs, ["摘要", "摘 要"])
+        idx_en_abs = self._find_exact_heading_index(paragraphs, ["abstract"], lower=True)
+        idx_catalogue = self._find_exact_heading_index(paragraphs, ["目录"])
         idx_main = self._find_chapter_index(paragraphs)
-        idx_ref = self._find_index(paragraphs, ["参考文献", "references", "bibliography"], lower=True)
-        idx_ack = self._find_index(paragraphs, ["致谢", "acknowledg"], lower=True)
+        idx_ref = self._find_exact_heading_index(paragraphs, ["参考文献", "references", "bibliography"], lower=True)
+        idx_ack = self._find_ack_index(paragraphs)
 
         # 封面
         cover_end = self._first_valid_index(
-            [idx_statement, idx_cn_abs, idx_main, idx_ref, idx_ack],
+            [idx_statement, idx_cn_abs, idx_catalogue, idx_main, idx_ref, idx_ack],
             default=len(paragraphs),
         )
         cover = paragraphs[:cover_end]
@@ -61,7 +62,7 @@ class LegacyDocxAdapter:
             self.parts_order.append("statement1")
             st_end = self._first_index_after(
                 idx_statement,
-                [idx_cn_abs, idx_en_abs, idx_main, idx_ref, idx_ack],
+                [idx_cn_abs, idx_en_abs, idx_catalogue, idx_main, idx_ref, idx_ack],
                 default=len(paragraphs),
             )
             st = paragraphs[idx_statement:st_end]
@@ -75,7 +76,7 @@ class LegacyDocxAdapter:
             self.parts_order.append("chinese_abstract")
             cn_end = self._first_index_after(
                 idx_cn_abs,
-                [idx_en_abs, idx_main, idx_ref, idx_ack],
+                [idx_en_abs, idx_catalogue, idx_main, idx_ref, idx_ack],
                 default=len(paragraphs),
             )
             cn = paragraphs[idx_cn_abs:cn_end]
@@ -93,7 +94,7 @@ class LegacyDocxAdapter:
             self.parts_order.append("english_abstract")
             en_end = self._first_index_after(
                 idx_en_abs,
-                [idx_main, idx_ref, idx_ack],
+                [idx_catalogue, idx_main, idx_ref, idx_ack],
                 default=len(paragraphs),
             )
             en = paragraphs[idx_en_abs:en_end]
@@ -105,6 +106,19 @@ class LegacyDocxAdapter:
                     sections["abstract_keyword"]["english_keyword"] = en[-1]
                 elif len(en) == 2:
                     sections["abstract_keyword"]["english_keyword"] = en[-1]
+
+        if idx_catalogue is not None:
+            self.parts_order.append("catalogue")
+            catalogue_end = self._first_index_after(
+                idx_catalogue,
+                [idx_main, idx_ref, idx_ack],
+                default=len(paragraphs),
+            )
+            cat = paragraphs[idx_catalogue:catalogue_end]
+            if cat:
+                sections["catalogue"]["title"] = cat[0]
+                if len(cat) > 1:
+                    sections["catalogue"]["content"] = cat[1:]
 
         # 正文及标题分类
         main_start = idx_main if idx_main is not None else 0
@@ -189,6 +203,45 @@ class LegacyDocxAdapter:
         return None
 
     @staticmethod
+    def _normalize_heading_text(text: str, *, lower: bool = False) -> str:
+        normalized = re.sub(r"[\s\u3000]+", "", text or "")
+        if lower:
+            normalized = normalized.lower()
+        return normalized
+
+    @classmethod
+    def _find_exact_heading_index(cls, paragraphs, headings: list[str], lower: bool = False):
+        normalized_headings = {
+            cls._normalize_heading_text(h, lower=lower)
+            for h in headings
+        }
+        for idx, para in enumerate(paragraphs):
+            normalized = cls._normalize_heading_text(para.text, lower=lower)
+            if normalized in normalized_headings:
+                return idx
+        return None
+
+    @classmethod
+    def _find_statement_index(cls, paragraphs):
+        statement_headings = [
+            "原创性声明",
+            "学位论文原创性声明",
+            "学位论文版权使用授权书",
+            "版权使用授权书",
+            "使用授权书",
+            "使用授权声明",
+        ]
+        return cls._find_exact_heading_index(paragraphs, statement_headings)
+
+    @classmethod
+    def _find_ack_index(cls, paragraphs):
+        for idx, para in enumerate(paragraphs):
+            normalized = cls._normalize_heading_text(para.text, lower=True)
+            if normalized in {"致谢", "acknowledgments", "acknowledgement"}:
+                return idx
+        return None
+
+    @staticmethod
     def _find_chapter_index(paragraphs):
         for idx, para in enumerate(paragraphs):
             if LegacyDocxAdapter._is_chapter_title(para.text.strip()):
@@ -207,22 +260,59 @@ class LegacyDocxAdapter:
 
     @staticmethod
     def _is_chapter_title(text: str) -> bool:
+        if not text:
+            return False
+        normalized = text.strip()
+        if re.search(r"[，。；：！？!?]", normalized):
+            return False
+        if len(normalized) > 40:
+            return False
         return bool(
-            re.match(r"^第[一二三四五六七八九十百千0-9]+章", text)
-            or re.match(r"^chapter\s+\d+", text.lower())
+            re.fullmatch(r"第[一二三四五六七八九十百千0-9]+章\s*[^\s，。；：！？!?]{1,30}", normalized)
+            or re.fullmatch(r"chapter\s+\d+\s+.{1,30}", normalized, flags=re.IGNORECASE)
         )
 
     @staticmethod
     def _is_level1_title(text: str) -> bool:
-        return bool(re.match(r"^\d+\.\d+\s*", text) or re.match(r"^[一二三四五六七八九十]+、", text))
+        if not text:
+            return False
+        normalized = text.strip()
+        if re.search(r"[，。；：！？!?]", normalized):
+            return False
+        if len(normalized) > 40:
+            return False
+        return bool(
+            re.fullmatch(r"\d+\.\d+\s*[^\s，。；：！？!?].{0,30}", normalized)
+            or re.fullmatch(r"[一二三四五六七八九十]+、[^\s，。；：！？!?].{0,30}", normalized)
+        )
 
     @staticmethod
     def _is_level2_title(text: str) -> bool:
-        return bool(re.match(r"^\d+\.\d+\.\d+\s*", text) or re.match(r"^（[一二三四五六七八九十]+）", text))
+        if not text:
+            return False
+        normalized = text.strip()
+        if re.search(r"[，。；：！？!?]", normalized):
+            return False
+        if len(normalized) > 40:
+            return False
+        return bool(
+            re.fullmatch(r"\d+\.\d+\.\d+\s*[^\s，。；：！？!?].{0,30}", normalized)
+            or re.fullmatch(r"（[一二三四五六七八九十]+）[^\s，。；：！？!?].{0,30}", normalized)
+        )
 
     @staticmethod
     def _is_level3_title(text: str) -> bool:
-        return bool(re.match(r"^\d+\.\s*", text) or re.match(r"^\d+\)", text))
+        if not text:
+            return False
+        normalized = text.strip()
+        if re.search(r"[，。；：！？!?]", normalized):
+            return False
+        if len(normalized) > 30:
+            return False
+        return bool(
+            re.fullmatch(r"\d+\.\s*[^\s，。；：！？!?].{0,20}", normalized)
+            or re.fullmatch(r"\d+\)[^\s，。；：！？!?].{0,20}", normalized)
+        )
 
     @staticmethod
     def _is_figure_or_table_title(text: str) -> bool:

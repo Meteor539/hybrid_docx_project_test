@@ -2,6 +2,7 @@ from typing import Dict, Any
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 import re # 导入正则表达式模块
 from docx.enum.text import WD_LINE_SPACING
+from docx.oxml.ns import qn
 
 class FormatChecker:
     def __init__(self):
@@ -207,6 +208,20 @@ class FormatChecker:
             "固定值15pt": 15, 
             "固定值20pt": 20
         }
+
+        # 字体别名映射（用于降低 python-docx 字体名读取差异导致的误报）
+        self.font_alias_groups = {
+            "华文中宋": {"华文中宋", "STZhongsong", "ST中宋"},
+            "宋体": {"宋体", "SimSun", "Songti"},
+            "黑体": {"黑体", "SimHei", "Heiti"},
+            "楷体": {"楷体", "KaiTi", "楷体_GB2312"},
+            "仿宋": {"仿宋", "FangSong", "仿宋_GB2312"},
+            "微软雅黑": {"微软雅黑", "Microsoft YaHei", "MSYH"},
+            "等线": {"等线", "DengXian"},
+            "Times New Roman": {"Times New Roman", "TimesNewRoman"},
+            "Arial": {"Arial"},
+        }
+        self.font_alias_lookup = self._build_font_alias_lookup()
 
     def _get_font_size_pt(self, size_option: str) -> float | None:
         """从字号选项中提取Pt值"""
@@ -534,25 +549,78 @@ class FormatChecker:
             return result
         
         return {"检查结果": "格式匹配无误"}
+
+    @staticmethod
+    def _normalize_font_name(font_name: str | None) -> str:
+        if not isinstance(font_name, str):
+            return ""
+        return re.sub(r"[\s_\-]", "", font_name).lower()
+
+    def _build_font_alias_lookup(self) -> Dict[str, str]:
+        lookup: Dict[str, str] = {}
+        for canonical, aliases in self.font_alias_groups.items():
+            canonical_norm = self._normalize_font_name(canonical)
+            lookup[canonical_norm] = canonical_norm
+            for alias in aliases:
+                lookup[self._normalize_font_name(alias)] = canonical_norm
+        return lookup
+
+    def _is_font_equivalent(self, expected_font: str, actual_font: str) -> bool:
+        expected_norm = self._normalize_font_name(expected_font)
+        actual_norm = self._normalize_font_name(actual_font)
+        if not expected_norm or not actual_norm:
+            return False
+        expected_canonical = self.font_alias_lookup.get(expected_norm, expected_norm)
+        actual_canonical = self.font_alias_lookup.get(actual_norm, actual_norm)
+        return expected_canonical == actual_canonical
+
+    def _get_run_font_candidates(self, run) -> list[str]:
+        fonts: list[str] = []
+
+        # 常规路径
+        run_font = run.font.name if getattr(run, "font", None) else None
+        if run_font:
+            fonts.append(str(run_font))
+
+        # 底层 XML 路径（eastAsia/ascii/hAnsi/cs）
+        try:
+            rpr = run._element.rPr
+            if rpr is not None:
+                rfonts = rpr.rFonts
+                if rfonts is not None:
+                    for key in ("eastAsia", "ascii", "hAnsi", "cs"):
+                        value = rfonts.get(qn(f"w:{key}"))
+                        if value:
+                            fonts.append(str(value))
+        except Exception:
+            pass
+
+        return [f for f in fonts if f]
         
     def _check_font(self, paragraph, expected_font):
         """检查字体"""
+        if not expected_font:
+            return True
+
         for run in paragraph.runs:
             if run.text.strip() == "":
                 continue
 
-            actual_font = run.font.name if run.font else None
-
-            if actual_font is None:
+            candidate_fonts = self._get_run_font_candidates(run)
+            if not candidate_fonts:
                 continue
 
-            if actual_font != expected_font:
+            if not any(self._is_font_equivalent(expected_font, x) for x in candidate_fonts):
                 return False
             
         return True
         
     def _check_size(self, paragraph, expected_size):
         """检查字号"""
+        target_size = self._get_font_size_pt(expected_size)
+        if target_size is None:
+            return True
+
         for run in paragraph.runs:
             if run.text.strip() == "":
                 continue
@@ -562,7 +630,8 @@ class FormatChecker:
             if actual_size is None:
                 continue
             
-            if actual_size != self._get_font_size_pt(expected_size):
+            # Word 中字号常有小数偏差，允许 0.5pt 容差
+            if abs(actual_size - target_size) > 0.5:
                 return False
             
         return True
@@ -570,7 +639,17 @@ class FormatChecker:
     def _check_alignment(self, paragraph, expected_alignment):
         """检查对齐方式"""
         actual_alignment = paragraph.alignment
-        return actual_alignment == self.alignment_mapping[expected_alignment]
+        target_alignment = self.alignment_mapping[expected_alignment]
+
+        # 段落未显式设置对齐时，尝试读取样式；仍为空则按“未指定”处理，不判错
+        if actual_alignment is None:
+            style = getattr(paragraph, "style", None)
+            style_format = getattr(style, "paragraph_format", None) if style else None
+            actual_alignment = getattr(style_format, "alignment", None) if style_format else None
+            if actual_alignment is None:
+                return True
+
+        return actual_alignment == target_alignment
     
     def _check_line_spacing(self, paragraph, expected_line_spacing):
         """检查行间距"""
@@ -584,16 +663,16 @@ class FormatChecker:
         target_line_spacing = self.line_spacing_mapping[expected_line_spacing]
 
         if expected_line_spacing == "0.5倍行距":
-            return actual_line_spacing_rule == target_line_spacing_rule and actual_line_spacing == target_line_spacing
+            return actual_line_spacing_rule == target_line_spacing_rule and abs(actual_line_spacing - target_line_spacing) <= 0.1
         elif expected_line_spacing == "单倍行距":
-            return (actual_line_spacing_rule == target_line_spacing_rule and actual_line_spacing == target_line_spacing) or actual_line_spacing_rule == WD_LINE_SPACING.SINGLE
+            return (actual_line_spacing_rule == target_line_spacing_rule and abs(actual_line_spacing - target_line_spacing) <= 0.1) or actual_line_spacing_rule == WD_LINE_SPACING.SINGLE
         elif expected_line_spacing == "1.5倍行距":
-            return (actual_line_spacing_rule == target_line_spacing_rule and actual_line_spacing == target_line_spacing) or actual_line_spacing_rule == WD_LINE_SPACING.ONE_POINT_FIVE
+            return (actual_line_spacing_rule == target_line_spacing_rule and abs(actual_line_spacing - target_line_spacing) <= 0.1) or actual_line_spacing_rule == WD_LINE_SPACING.ONE_POINT_FIVE
         elif expected_line_spacing == "2倍行距":
-            return (actual_line_spacing_rule == target_line_spacing_rule and actual_line_spacing == target_line_spacing) or actual_line_spacing_rule == WD_LINE_SPACING.DOUBLE
+            return (actual_line_spacing_rule == target_line_spacing_rule and abs(actual_line_spacing - target_line_spacing) <= 0.1) or actual_line_spacing_rule == WD_LINE_SPACING.DOUBLE
         elif expected_line_spacing == "3倍行距":    
-            return actual_line_spacing_rule == target_line_spacing_rule and actual_line_spacing == target_line_spacing
+            return actual_line_spacing_rule == target_line_spacing_rule and abs(actual_line_spacing - target_line_spacing) <= 0.1
         elif "固定值" in expected_line_spacing: 
-            return actual_line_spacing_rule == target_line_spacing_rule and actual_line_spacing.pt == target_line_spacing
+            return actual_line_spacing_rule == target_line_spacing_rule and abs(actual_line_spacing.pt - target_line_spacing) <= 0.5
 
         

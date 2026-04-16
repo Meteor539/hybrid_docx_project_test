@@ -838,10 +838,61 @@ class MainWindow(QMainWindow):
             source_layout = QFormLayout()
             lines = []
             for issue in source_issues:
-                lines.append(
-                    f"[{issue.get('severity', 'info')}] {issue.get('title', '')}: "
-                    f"{issue.get('message', '')}"
-                )
+                severity = issue.get("severity", "info")
+                title = issue.get("title", "")
+                message = issue.get("message", "")
+                metadata = issue.get("metadata") or {}
+
+                line = f"[{severity}] {title}: {message}"
+
+                if source == "docx" and isinstance(metadata, dict):
+                    section = str(metadata.get("section") or "").strip()
+                    content = str(metadata.get("content") or "").strip()
+                    problem = str(metadata.get("problem") or "").strip()
+
+                    if section or content or problem:
+                        line = f"[{severity}]"
+                        if section:
+                            line += f" {section}"
+                        if content:
+                            content = content.replace("\n", " ")
+                            if len(content) > 120:
+                                content = content[:120] + "..."
+                            line += f"\n内容: {content}"
+                        if problem:
+                            line += f"\n问题: {problem}"
+                        lines.append(line)
+                        continue
+
+                    # docx 结果采用分行细节展示，同时保留告警级别
+                    line = f"[{severity}]"
+                    path = metadata.get("path")
+                    detail = metadata.get("detail")
+                    if path:
+                        line += f"\n路径: {path}"
+                    if isinstance(detail, dict):
+                        para_text = str(detail.get("段落") or detail.get("参考文献") or "").strip()
+                        if para_text:
+                            para_text = para_text.replace("\n", " ")
+                            if len(para_text) > 120:
+                                para_text = para_text[:120] + "..."
+                            line += f"\n段落: {para_text}"
+
+                        failed_items = []
+                        for k in ("字体", "字号", "对齐方式", "行间距"):
+                            if detail.get(k) is False:
+                                failed_items.append(k)
+                        if failed_items:
+                            line += f"\n问题项: {', '.join(failed_items)}"
+
+                        check_result = detail.get("检查结果")
+                        if isinstance(check_result, str) and check_result:
+                            line += f"\n说明: {check_result}"
+
+                    if line == f"[{severity}]":
+                        line = f"[{severity}] {title}"
+
+                lines.append(line)
             content_label = QLabel("\n".join(lines))
             content_label.setWordWrap(True)
             source_layout.addRow(content_label)

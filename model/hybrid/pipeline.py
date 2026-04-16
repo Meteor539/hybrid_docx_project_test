@@ -7,8 +7,17 @@ from model.core.merger import IssueMerger
 from model.core.registry import RuleRegistry
 from model.docx_engine.parser import DocxContextBuilder
 from model.docx_engine.rules import (
+    ChineseAbstractLengthRule,
+    CoverTitleLengthRule,
+    FirstStageSectionPresenceRule,
+    HeadingCitationRule,
+    HeadingPunctuationRule,
+    KeywordCountRule,
     LegacyFormatCheckRule,
     LegacyOrderCheckRule,
+    PageSettingsRule,
+    ReferenceCountRule,
+    ReferenceTerminalPeriodRule,
 )
 from model.hybrid.fix_planner import FixPlanner
 from model.hybrid.router import RuleRouter
@@ -163,6 +172,15 @@ def create_default_registry() -> RuleRegistry:
     registry = RuleRegistry()
 
     # 文档对象侧规则（复用旧版完整检查）
+    registry.register(FirstStageSectionPresenceRule())
+    registry.register(CoverTitleLengthRule())
+    registry.register(ChineseAbstractLengthRule())
+    registry.register(KeywordCountRule())
+    registry.register(HeadingPunctuationRule())
+    registry.register(HeadingCitationRule())
+    registry.register(ReferenceTerminalPeriodRule())
+    registry.register(ReferenceCountRule())
+    registry.register(PageSettingsRule())
     registry.register(LegacyFormatCheckRule())
     registry.register(LegacyOrderCheckRule())
 

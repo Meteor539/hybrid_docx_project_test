@@ -48,11 +48,12 @@ class LegacyFormatCheckRule(BaseRule):
         for index, item in enumerate(failures, start=1):
             path = item.get("path", "root")
             detail = item.get("detail", {})
+            detail_text = self._build_detail_text(path, detail)
             issues.append(
                 Issue(
                     rule_id=f"{self.rule_id}.{index}",
                     title="格式不匹配",
-                    message=f"路径 {path} 存在格式问题。",
+                    message=detail_text,
                     severity=Severity.WARNING,
                     source=Source.DOCX,
                     fixable=False,
@@ -61,6 +62,35 @@ class LegacyFormatCheckRule(BaseRule):
             )
 
         return issues
+
+    @staticmethod
+    def _build_detail_text(path: str, detail: dict) -> str:
+        """把旧版检查器的原始结果转成更易读的提示文本。"""
+        if not isinstance(detail, dict):
+            return f"路径 {path} 存在格式问题。"
+
+        paragraph = str(detail.get("段落") or detail.get("参考文献") or "").strip()
+        paragraph = paragraph.replace("\n", " ")
+        if len(paragraph) > 60:
+            paragraph = f"{paragraph[:60]}..."
+
+        failed_items: list[str] = []
+        for key in ("字体", "字号", "对齐方式", "行间距"):
+            if detail.get(key) is False:
+                failed_items.append(key)
+
+        check_result = detail.get("检查结果")
+        if isinstance(check_result, str) and ("无误" not in check_result and "匹配" not in check_result):
+            failed_items.append("检查结果")
+
+        message = f"路径 {path} 存在格式问题"
+        if failed_items:
+            message += f"（问题项：{', '.join(failed_items)}）"
+        if paragraph:
+            message += f"；段落：{paragraph}"
+        if isinstance(check_result, str) and check_result:
+            message += f"；说明：{check_result}"
+        return message + "。"
 
 
 class LegacyOrderCheckRule(BaseRule):
