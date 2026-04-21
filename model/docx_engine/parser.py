@@ -1,10 +1,10 @@
-from model.compat.legacy_docx_adapter import LegacyDocxAdapter
+from model.compat.docx_structure_adapter import DocxStructureAdapter
 from model.core.context import RuleContext
 
 
 class DocxContextBuilder:
     def __init__(self) -> None:
-        self.adapter = LegacyDocxAdapter()
+        self.adapter = DocxStructureAdapter()
 
     def build(self, file_path: str) -> RuleContext:
         doc_obj = None

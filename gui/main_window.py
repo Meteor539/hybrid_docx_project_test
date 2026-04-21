@@ -12,6 +12,7 @@ from model.document_parser import DocumentParser
 from model.format_checker import FormatChecker
 from model.format_modifier import FormatModifier
 from model import create_default_hybrid_processor
+from model.pdf_engine import DocxToPdfConverter
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -48,6 +49,8 @@ class MainWindow(QMainWindow):
         self.checker = FormatChecker()
         self.modifier = FormatModifier()
         self.hybrid_processor = create_default_hybrid_processor()
+        self.docx_to_pdf_converter = DocxToPdfConverter()
+        self.generated_pdf_path = None
         
         # 创建主窗口部件
         self.main_widget = QWidget()
@@ -88,6 +91,14 @@ class MainWindow(QMainWindow):
         button_area.addWidget(self.select_file_btn)
         
         file_layout.addLayout(button_area)
+
+        pdf_area = QHBoxLayout()
+        self.pdf_path_label = QLabel("未选择PDF（将自动尝试同名PDF）")
+        self.select_pdf_btn = QPushButton("选择PDF")
+        self.select_pdf_btn.clicked.connect(self.select_pdf)
+        pdf_area.addWidget(self.pdf_path_label)
+        pdf_area.addWidget(self.select_pdf_btn)
+        file_layout.addLayout(pdf_area)
         file_group.setLayout(file_layout)
         
         # 设置文件操作区接受拖拽
@@ -104,11 +115,18 @@ class MainWindow(QMainWindow):
             if file_path.lower().endswith('.docx'):
                 event.acceptProposedAction()
                 
+    @staticmethod
+    def normalize_display_path(path: str) -> str:
+        if not path:
+            return path
+        return os.path.normpath(path)
+
     def dropEvent(self, event: QDropEvent):
         """处理拖拽释放事件"""
         file_path = event.mimeData().urls()[0].toLocalFile()
         if file_path.lower().endswith('.docx'):
-            self.file_path_label.setText(file_path)
+            self.file_path_label.setText(self.normalize_display_path(file_path))
+            self.sync_pdf_path(file_path)
             event.acceptProposedAction()
         else:
             # 如果不是docx文件，显示错误信息
@@ -131,6 +149,8 @@ class MainWindow(QMainWindow):
 
         self.create_abstract_keyword_tab() # 创建摘要和关键词选项卡
 
+        self.create_catalogue_tab() # 创建目录选项卡
+
         self.create_main_text_tab() # 创建正文选项卡
         
         self.create_headings_tab() # 创建标题选项卡
@@ -143,6 +163,7 @@ class MainWindow(QMainWindow):
         
         # 设置默认值
         self.set_default_format_values()
+        self.apply_post_defaults()
         
         settings_layout.addWidget(self.tab_widget)
         settings_group.setLayout(settings_layout)
@@ -152,6 +173,16 @@ class MainWindow(QMainWindow):
         self.format_combos[section][key] = QComboBox()
         self.format_combos[section][key].addItems(self.font_options if 'font' in key else self.size_options if 'size' in key else self.alignment_options if 'align' in key else self.line_spacing_options)
         layout.addRow(label, self.format_combos[section][key])
+
+    def apply_post_defaults(self):
+        """补充设置需要明确覆盖的默认值。"""
+        if "参考文献" in self.format_combos:
+            self.set_default_format_value("参考文献", "title", "黑体", "小二 (18pt)", "居中", "固定值20pt")
+            self.set_default_format_value("参考文献", "content", "宋体", "五号 (10.5pt)", "左对齐", "固定值20pt")
+
+        if "致谢" in self.format_combos:
+            self.set_default_format_value("致谢", "title", "黑体", "小二 (18pt)", "居中", "固定值20pt")
+            self.set_default_format_value("致谢", "content", "宋体", "小四 (12pt)", "两端对齐", "固定值20pt")
 
     def create_sub_tab(self, section, prefix):
         sub_tab = QWidget()
@@ -268,8 +299,8 @@ class MainWindow(QMainWindow):
 
         # 为英文摘要添加三级 tab
         english_sub_tab_widget = QTabWidget()
-        english_sub_tab_widget.addTab(english_title_tab, "标题")
-        english_sub_tab_widget.addTab(english_content_tab, "内容")
+        english_sub_tab_widget.addTab(english_title_tab, "摘要标题")
+        english_sub_tab_widget.addTab(english_content_tab, "摘要内容")
         english_sub_tab_widget.addTab(english_keyword_title_tab, "关键词标题")
         english_sub_tab_widget.addTab(english_keyword_tab, "关键词内容")
 
@@ -307,6 +338,20 @@ class MainWindow(QMainWindow):
         self.format_combos[section]["line_spacing"].addItems(self.line_spacing_options)
         tab_layout.addRow("行间距", self.format_combos[section]["line_spacing"])
 
+        self.tab_widget.addTab(tab, section)
+
+    def create_catalogue_tab(self, section = "目录"):
+        self.format_combos[section] = {}
+
+        tab = QWidget()
+        tab_layout = QFormLayout(tab)
+        sub_tab_widget = QTabWidget()
+        sub_tab_widget.setTabPosition(QTabWidget.TabPosition.North)
+
+        sub_tab_widget.addTab(self.create_sub_tab(section, "title"), "目录标题")
+        sub_tab_widget.addTab(self.create_sub_tab(section, "content"), "目录内容")
+
+        tab_layout.addWidget(sub_tab_widget)
         self.tab_widget.addTab(tab, section)
 
     def create_headings_tab(self, section = "标题"):
@@ -474,6 +519,34 @@ class MainWindow(QMainWindow):
 
         self.tab_widget.addTab(tab, section) 
 
+    def create_references_tab(self, section = "参考文献"):
+        self.format_combos[section] = {}
+
+        tab = QWidget()
+        tab_layout = QFormLayout(tab)
+        sub_tab_widget = QTabWidget()
+        sub_tab_widget.setTabPosition(QTabWidget.TabPosition.North)
+
+        sub_tab_widget.addTab(self.create_sub_tab(section, "title"), "参考文献标题")
+        sub_tab_widget.addTab(self.create_sub_tab(section, "content"), "参考文献内容")
+
+        tab_layout.addWidget(sub_tab_widget)
+        self.tab_widget.addTab(tab, section)
+
+    def create_acknowledgments_tab(self, section = "致谢"):
+        self.format_combos[section] = {}
+
+        tab = QWidget()
+        tab_layout = QFormLayout(tab)
+        sub_tab_widget = QTabWidget()
+        sub_tab_widget.setTabPosition(QTabWidget.TabPosition.North)
+
+        sub_tab_widget.addTab(self.create_sub_tab(section, "title"), "致谢标题")
+        sub_tab_widget.addTab(self.create_sub_tab(section, "content"), "致谢内容")
+
+        tab_layout.addWidget(sub_tab_widget)
+        self.tab_widget.addTab(tab, section)
+
     def set_default_format_value(self, section, key, font, size, align, line_spacing):
         """设置默认的格式值"""
         self.format_combos[section][f"{key}_font"].setCurrentText(font)
@@ -528,6 +601,11 @@ class MainWindow(QMainWindow):
             self.format_combos["正文"]["size"].setCurrentText("小四 (12pt)")
             self.format_combos["正文"]["align"].setCurrentText("两端对齐")
             self.format_combos["正文"]["line_spacing"].setCurrentText("固定值20pt")
+
+        # 目录
+        if "目录" in self.format_combos:
+            self.set_default_format_value("目录", "title", "黑体", "小二 (18pt)", "居中", "固定值20pt")
+            self.set_default_format_value("目录", "content", "宋体", "小四 (12pt)", "左对齐", "固定值20pt")
             
         # 标题
         if "标题" in self.format_combos:
@@ -545,7 +623,7 @@ class MainWindow(QMainWindow):
 
         # 图|表题
         if "图|表题" in self.format_combos:
-            self.format_combos["图|表题"]["font"].setCurrentText("黑体")
+            self.format_combos["图|表题"]["font"].setCurrentText("宋体")
             self.format_combos["图|表题"]["size"].setCurrentText("小四 (12pt)")
             self.format_combos["图|表题"]["align"].setCurrentText("居中")
             self.format_combos["图|表题"]["line_spacing"].setCurrentText("固定值20pt")
@@ -556,7 +634,7 @@ class MainWindow(QMainWindow):
             self.set_default_format_value("参考文献", "title", "黑体", "小二 (18pt)", "居中", "固定值20pt")
             
             # 参考文献内容
-            self.set_default_format_value("参考文献", "content", "宋体", "小四 (12pt)", "左对齐", "固定值20pt")
+            self.set_default_format_value("参考文献", "content", "宋体", "五号 (10.5pt)", "左对齐", "固定值20pt")
             
         # 致谢
         if "致谢" in self.format_combos:
@@ -615,8 +693,50 @@ class MainWindow(QMainWindow):
             "Word文档 (*.docx)"
         )
         if file_path:
-            self.file_path_label.setText(file_path)
-            
+            self.file_path_label.setText(self.normalize_display_path(file_path))
+            self.sync_pdf_path(file_path)
+
+    def select_pdf(self):
+        """选择用于图像侧分析的 PDF 文件。"""
+        pdf_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择PDF文件",
+            "",
+            "PDF文件 (*.pdf)"
+        )
+        if pdf_path:
+            self.pdf_path_label.setText(self.normalize_display_path(pdf_path))
+
+    def sync_pdf_path(self, docx_path: str):
+        """自动匹配同名 PDF，方便触发图像侧分析。"""
+        if not docx_path:
+            self.pdf_path_label.setText("未选择PDF（将自动尝试同名PDF）")
+            return
+
+        default_pdf = os.path.splitext(docx_path)[0] + ".pdf"
+        if os.path.exists(default_pdf):
+            self.pdf_path_label.setText(self.normalize_display_path(default_pdf))
+        else:
+            self.pdf_path_label.setText("未选择PDF（将自动尝试同名PDF）")
+
+    def get_selected_pdf_path(self):
+        """获取当前选中的 PDF 路径。"""
+        pdf_path = self.pdf_path_label.text().strip()
+        if not pdf_path or pdf_path == "未选择PDF（将自动尝试同名PDF）":
+            return None
+        return pdf_path
+
+    def ensure_pdf_for_hybrid_check(self, docx_path: str):
+        """确保混合检查可用的 PDF 输入。"""
+        pdf_path = self.get_selected_pdf_path()
+        if pdf_path and os.path.exists(pdf_path) and pdf_path != self.generated_pdf_path:
+            return pdf_path
+
+        generated_pdf_path = self.docx_to_pdf_converter.convert(docx_path)
+        self.generated_pdf_path = generated_pdf_path
+        self.pdf_path_label.setText(self.normalize_display_path(generated_pdf_path))
+        return generated_pdf_path
+             
     def get_format_settings(self):
         """获取用户设置的格式"""
         formats = {}
@@ -685,11 +805,35 @@ class MainWindow(QMainWindow):
 
         try:
             user_formats = self.get_format_settings()
+            pdf_path = self.ensure_pdf_for_hybrid_check(self.file_path_label.text())
             result = self.hybrid_processor.process(
                 self.file_path_label.text(),
+                pdf_path=pdf_path,
                 user_formats=user_formats
             )
             self.display_hybrid_results(result)
+        except RuntimeError as e:
+            QMessageBox.warning(
+                self,
+                "PDF转换失败",
+                f"{str(e)}\n\n本次将仅执行文档侧检查。",
+                QMessageBox.StandardButton.Ok
+            )
+            try:
+                user_formats = self.get_format_settings()
+                result = self.hybrid_processor.process(
+                    self.file_path_label.text(),
+                    pdf_path=None,
+                    user_formats=user_formats
+                )
+                self.display_hybrid_results(result)
+            except Exception as inner_e:
+                QMessageBox.critical(
+                    self,
+                    "错误",
+                    f"混合检查失败：\n{str(inner_e)}",
+                    QMessageBox.StandardButton.Ok
+                )
         except Exception as e:
             QMessageBox.critical(
                 self,
@@ -821,16 +965,26 @@ class MainWindow(QMainWindow):
         overview_widget.setLayout(overview_layout)
         self.result_layout.addWidget(overview_widget)
 
+        status_widget = QGroupBox("执行状态")
+        status_layout = QFormLayout()
+        for engine_name, status_text in self.build_engine_status_lines(engine_counts, context_status, issues):
+            status_label = QLabel(status_text)
+            status_label.setWordWrap(True)
+            status_layout.addRow(f"{engine_name}：", status_label)
+        status_widget.setLayout(status_layout)
+        self.result_layout.addWidget(status_widget)
+
         if not issues:
             no_issue_label = QLabel("✓ 未发现格式问题")
             no_issue_label.setStyleSheet("color: green; font-weight: bold; font-size: 14px;")
             no_issue_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            no_issue_label.setText("未发现格式问题，但混合检查链路已执行。")
             self.result_layout.addWidget(no_issue_label)
             return
 
         grouped = {}
         for issue in issues:
-            source = issue.get("source", "unknown")
+            source = self.get_issue_group_name(issue)
             grouped.setdefault(source, []).append(issue)
 
         for source, source_issues in grouped.items():
@@ -898,7 +1052,62 @@ class MainWindow(QMainWindow):
             source_layout.addRow(content_label)
             source_widget.setLayout(source_layout)
             self.result_layout.addWidget(source_widget)
-            
+
+    def build_engine_status_lines(self, engine_counts, context_status, issues):
+        """构建文档侧与图像侧执行状态。"""
+        docx_error = context_status.get("docx_parse_error")
+        docx_parts_count = context_status.get("docx_parts_order_count", 0)
+        pdf_path = context_status.get("pdf_path")
+        pdf_error = context_status.get("pdf_extract_error")
+        ocr_error = context_status.get("ocr_error")
+
+        docx_count = engine_counts.get("docx", 0)
+        pdf_count = engine_counts.get("pdf", 0)
+        ocr_count = engine_counts.get("ocr", 0)
+
+        ocr_issues = [issue for issue in issues if issue.get("source") == "ocr"]
+        ocr_fallback_only = bool(ocr_issues) and all(
+            issue.get("rule_id") == "ocr.fallback.status" for issue in ocr_issues
+        )
+
+        if docx_error:
+            docx_status = f"执行失败。文档解析出错：{docx_error}"
+        else:
+            docx_status = f"已执行。解析到 {docx_parts_count} 个板块，当前问题数 {docx_count}。"
+
+        image_parts = []
+        if not pdf_path:
+            image_parts.append("PDF 页面分析未执行：未提供可用于页面分析的 PDF。")
+        elif pdf_error:
+            image_parts.append(f"PDF 页面分析失败：{pdf_error}")
+        else:
+            image_parts.append(f"PDF 页面分析已执行，当前问题数 {pdf_count}。")
+
+        if ocr_error:
+            image_parts.append(f"OCR 页面分析失败：{ocr_error}")
+        elif ocr_issues and not ocr_fallback_only:
+            image_parts.append(f"OCR 页面分析已执行，当前问题数 {ocr_count}。")
+        else:
+            image_parts.append("OCR 页面分析当前未真正接入，本轮未执行真实 OCR 检查。")
+
+        image_count = pdf_count
+        if ocr_issues and not ocr_fallback_only:
+            image_count += ocr_count
+
+        return [
+            ("DOCX", docx_status),
+            ("图像侧", " ".join(image_parts) + f" 图像侧合计问题数 {image_count}。"),
+        ]
+
+    def get_issue_group_name(self, issue):
+        """将 pdf/ocr 统一归并为图像侧展示。"""
+        source = issue.get("source", "unknown")
+        if source == "docx":
+            return "docx"
+        if source in {"pdf", "ocr"}:
+            return "图像侧"
+        return source
+
     def get_section_name(self, section_key):
         """根据section键获取中文名称"""
         section_names = {

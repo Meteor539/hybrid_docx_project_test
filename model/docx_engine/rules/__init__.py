@@ -1,7 +1,6 @@
 from model.docx_engine.rules.abstract_rules import AbstractSectionPresenceRule
 from model.docx_engine.rules.cover_rules import CoverTitlePresenceRule
 from model.docx_engine.rules.heading_rules import MainTextPresenceRule
-from model.docx_engine.rules.legacy_rules import LegacyFormatCheckRule, LegacyOrderCheckRule
 from model.docx_engine.rules.reference_rules import ReferenceSectionPresenceRule
 from model.docx_engine.rules.stage1_rules import (
     ChineseAbstractLengthRule,
@@ -13,7 +12,20 @@ from model.docx_engine.rules.stage1_rules import (
     ReferenceCountRule,
     ReferenceTerminalPeriodRule,
 )
-from model.docx_engine.rules.stage2_rules import PageSettingsRule
+from model.docx_engine.rules.stage2_rules import (
+    AlignmentFormatRule,
+    AppendixFormatRule,
+    CatalogueHeadingConsistencyRule,
+    CatalogueNumberFontRule,
+    CaptionFormatRule,
+    CitationReferenceConsistencyRule,
+    FontSizeFormatRule,
+    FormulaNumberFormatRule,
+    HeaderFormatRule,
+    LineSpacingFormatRule,
+    PageSettingsRule,
+    SectionOrderRule,
+)
 
 __all__ = [
     "CoverTitlePresenceRule",
@@ -29,6 +41,15 @@ __all__ = [
     "ReferenceTerminalPeriodRule",
     "ReferenceCountRule",
     "PageSettingsRule",
-    "LegacyFormatCheckRule",
-    "LegacyOrderCheckRule",
+    "FontSizeFormatRule",
+    "AlignmentFormatRule",
+    "LineSpacingFormatRule",
+    "FormulaNumberFormatRule",
+    "HeaderFormatRule",
+    "CaptionFormatRule",
+    "AppendixFormatRule",
+    "SectionOrderRule",
+    "CatalogueHeadingConsistencyRule",
+    "CatalogueNumberFontRule",
+    "CitationReferenceConsistencyRule",
 ]

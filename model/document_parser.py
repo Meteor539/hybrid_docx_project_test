@@ -1,5 +1,6 @@
 import re
 from docx import Document
+from docx.text.paragraph import Paragraph
 
 try:
     from PyQt6.QtCore import Qt
@@ -10,6 +11,15 @@ except Exception:  # noqa: BLE001
 
 
 class DocumentParser:
+    _statement_headings = [
+        "原创性声明",
+        "学位论文原创性声明",
+        "学位论文版权使用授权书",
+        "版权使用授权书",
+        "使用授权书",
+        "使用授权声明",
+    ]
+
     def __init__(self):
         self.doc = None
         self.sections = self._empty_sections()
@@ -45,7 +55,7 @@ class DocumentParser:
         self.sections = self._empty_sections()
         self.parts_order = []
 
-        paragraphs = [p for p in self.doc.paragraphs if p.text and p.text.strip()]
+        paragraphs = [p for p in self._collect_body_paragraphs() if p.text and p.text.strip()]
         if not paragraphs:
             return self.sections
 
@@ -79,9 +89,9 @@ class DocumentParser:
             )
             st = paragraphs[idx_statement:st_end]
             if st:
-                self.sections["statement"]["title"] = [st[0]]
-                if len(st) > 1:
-                    self.sections["statement"]["content"] = st[1:]
+                statement_titles, statement_contents = self._split_statement_block(st)
+                self.sections["statement"]["title"] = statement_titles
+                self.sections["statement"]["content"] = statement_contents
 
         if idx_cn_abs is not None:
             self.parts_order.append("chinese_abstract")
@@ -91,12 +101,7 @@ class DocumentParser:
             cn = paragraphs[idx_cn_abs:cn_end]
             if cn:
                 self.sections["abstract_keyword"]["chinese_title"] = cn[0]
-                if len(cn) > 2:
-                    self.sections["abstract_keyword"]["chinese_content"] = cn[1:-2]
-                    self.sections["abstract_keyword"]["chinese_keyword_title"] = cn[-2]
-                    self.sections["abstract_keyword"]["chinese_keyword"] = cn[-1]
-                elif len(cn) == 2:
-                    self.sections["abstract_keyword"]["chinese_keyword"] = cn[-1]
+                self._assign_abstract_parts(cn, language="chinese")
 
         if idx_en_abs is not None:
             self.parts_order.append("english_abstract")
@@ -104,12 +109,7 @@ class DocumentParser:
             en = paragraphs[idx_en_abs:en_end]
             if en:
                 self.sections["abstract_keyword"]["english_title"] = en[0]
-                if len(en) > 2:
-                    self.sections["abstract_keyword"]["english_content"] = en[1:-2]
-                    self.sections["abstract_keyword"]["english_keyword_title"] = en[-2]
-                    self.sections["abstract_keyword"]["english_keyword"] = en[-1]
-                elif len(en) == 2:
-                    self.sections["abstract_keyword"]["english_keyword"] = en[-1]
+                self._assign_abstract_parts(en, language="english")
 
         if idx_catalogue is not None:
             self.parts_order.append("catalogue")
@@ -159,6 +159,71 @@ class DocumentParser:
         self.sections["figures"] = self.doc.inline_shapes
         self.sections["tables"] = self.doc.tables
         return self.sections
+
+    def _collect_body_paragraphs(self):
+        """按文档顺序收集正文段落，并补上 sdt 中的自动目录段落。"""
+        body = getattr(self.doc, "_body", None)
+        body_element = getattr(body, "_element", None) if body is not None else None
+        if body_element is None:
+            return list(getattr(self.doc, "paragraphs", []) or [])
+
+        paragraphs = []
+        for child in body_element.iterchildren():
+            paragraphs.extend(self._extract_paragraphs_from_element(child, body))
+        return paragraphs
+
+    def _extract_paragraphs_from_element(self, element, parent):
+        paragraphs = []
+        tag = getattr(element, "tag", "")
+        if tag.endswith("}p"):
+            paragraphs.append(Paragraph(element, parent))
+            return paragraphs
+
+        if tag.endswith("}sdt") or tag.endswith("}sdtContent"):
+            for child in element.iterchildren():
+                paragraphs.extend(self._extract_paragraphs_from_element(child, parent))
+        return paragraphs
+
+    def _assign_abstract_parts(self, paragraphs, *, language: str):
+        if not paragraphs:
+            return
+
+        content_key = f"{language}_content"
+        keyword_title_key = f"{language}_keyword_title"
+        keyword_key = f"{language}_keyword"
+
+        body = paragraphs[1:]
+        if not body:
+            return
+
+        keyword_idx = self._find_keyword_paragraph_index(body, language=language)
+        if keyword_idx is not None:
+            keyword_paragraph = body[keyword_idx]
+            content_paragraphs = body[:keyword_idx]
+            self.sections["abstract_keyword"][content_key] = content_paragraphs or None
+            # 关键词通常与内容同段，这里把同一段同时登记为标题和内容，供后续细粒度检查拆分。
+            self.sections["abstract_keyword"][keyword_title_key] = keyword_paragraph
+            self.sections["abstract_keyword"][keyword_key] = keyword_paragraph
+            return
+
+        if len(body) >= 2:
+            self.sections["abstract_keyword"][content_key] = body[:-1]
+            self.sections["abstract_keyword"][keyword_key] = body[-1]
+        else:
+            self.sections["abstract_keyword"][keyword_key] = body[-1]
+
+    @staticmethod
+    def _find_keyword_paragraph_index(paragraphs, *, language: str):
+        if language == "english":
+            pattern = r"^\s*key\s*words?\s*[:：]"
+        else:
+            pattern = r"^\s*(关键词|关\s*键\s*词)\s*[:：]"
+
+        for idx, para in enumerate(paragraphs):
+            text = (para.text or "").strip()
+            if re.match(pattern, text, flags=re.IGNORECASE):
+                return idx
+        return None
 
     def check_order(self):
         correct_orders = [
@@ -244,15 +309,27 @@ class DocumentParser:
 
     @classmethod
     def _find_statement_index(cls, paragraphs):
-        statement_headings = [
-            "原创性声明",
-            "学位论文原创性声明",
-            "学位论文版权使用授权书",
-            "版权使用授权书",
-            "使用授权书",
-            "使用授权声明",
-        ]
-        return cls._find_exact_heading_index(paragraphs, statement_headings)
+        return cls._find_exact_heading_index(paragraphs, cls._statement_headings)
+
+    @classmethod
+    def _is_statement_heading(cls, text: str) -> bool:
+        normalized = cls._normalize_heading_text(text)
+        normalized_headings = {cls._normalize_heading_text(item) for item in cls._statement_headings}
+        return normalized in normalized_headings
+
+    @classmethod
+    def _split_statement_block(cls, paragraphs):
+        titles = []
+        contents = []
+        for paragraph in paragraphs or []:
+            text = (getattr(paragraph, "text", "") or "").strip()
+            if not text:
+                continue
+            if cls._is_statement_heading(text):
+                titles.append(paragraph)
+            else:
+                contents.append(paragraph)
+        return titles, contents
 
     @classmethod
     def _find_ack_index(cls, paragraphs):

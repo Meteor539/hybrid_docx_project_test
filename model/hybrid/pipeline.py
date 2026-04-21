@@ -7,24 +7,44 @@ from model.core.merger import IssueMerger
 from model.core.registry import RuleRegistry
 from model.docx_engine.parser import DocxContextBuilder
 from model.docx_engine.rules import (
+    AlignmentFormatRule,
+    AppendixFormatRule,
+    CatalogueHeadingConsistencyRule,
+    CatalogueNumberFontRule,
+    CaptionFormatRule,
     ChineseAbstractLengthRule,
     CoverTitleLengthRule,
+    CitationReferenceConsistencyRule,
+    FontSizeFormatRule,
     FirstStageSectionPresenceRule,
+    FormulaNumberFormatRule,
+    HeaderFormatRule,
     HeadingCitationRule,
     HeadingPunctuationRule,
     KeywordCountRule,
-    LegacyFormatCheckRule,
-    LegacyOrderCheckRule,
+    LineSpacingFormatRule,
     PageSettingsRule,
     ReferenceCountRule,
     ReferenceTerminalPeriodRule,
+    SectionOrderRule,
 )
 from model.hybrid.fix_planner import FixPlanner
 from model.hybrid.router import RuleRouter
 from model.pdf_engine.extractor import PdfExtractor
 from model.pdf_engine.rules import (
+    ChapterStartsNewPagePdfRule,
+    HeaderStartBoundaryPdfRule,
+    FigureCaptionBelowPdfRule,
+    FigureCaptionCenterPdfRule,
     FigureTableCaptionHintRule,
+    FigureTableSplitAcrossPagesPdfRule,
+    HeaderTopContentPdfRule,
+    PageNumberBottomCenterPdfRule,
     PageNumberPresencePdfRule,
+    PageNumberStyleSequencePdfRule,
+    TableCaptionCenterPdfRule,
+    TableCaptionAbovePdfRule,
+    TocLevelPresentationPdfRule,
     TocPresencePdfRule,
 )
 from model.vision_engine.analyzer import OcrAnalyzer
@@ -76,7 +96,7 @@ class HybridProcessor:
                             metadata={"engine": engine},
                         )
                     )
-            grouped_issues[engine] = engine_issues
+            grouped_issues[engine] = filter_display_issues(engine_issues)
 
         merged = self.merger.merge(grouped_issues)
         if enable_fix:
@@ -88,10 +108,6 @@ class HybridProcessor:
             "issues": [issue_to_dict(x) for x in merged],
             "engine_counts": {k: len(v) for k, v in grouped_issues.items()},
             "context_status": build_context_status(ctx.extras),
-            "legacy": {
-                "format_results": ctx.extras.get("legacy_format_results"),
-                "order_results": ctx.extras.get("legacy_order_results"),
-            },
         }
 
     def _build_context(
@@ -159,6 +175,11 @@ def issue_to_dict(issue: Issue) -> dict[str, Any]:
     }
 
 
+def filter_display_issues(issues: list[Issue]) -> list[Issue]:
+    """Filter out status-only placeholder issues from the main result list."""
+    return [issue for issue in issues if issue.rule_id not in STATUS_ONLY_RULE_IDS]
+
+
 def build_summary(issues: list[Issue]) -> dict[str, int]:
     return {
         "total": len(issues),
@@ -181,13 +202,32 @@ def create_default_registry() -> RuleRegistry:
     registry.register(ReferenceTerminalPeriodRule())
     registry.register(ReferenceCountRule())
     registry.register(PageSettingsRule())
-    registry.register(LegacyFormatCheckRule())
-    registry.register(LegacyOrderCheckRule())
-
+    registry.register(FontSizeFormatRule())
+    registry.register(AlignmentFormatRule())
+    registry.register(LineSpacingFormatRule())
+    registry.register(FormulaNumberFormatRule())
+    registry.register(HeaderFormatRule())
+    registry.register(CaptionFormatRule())
+    registry.register(AppendixFormatRule())
+    registry.register(SectionOrderRule())
+    registry.register(CatalogueHeadingConsistencyRule())
+    registry.register(CatalogueNumberFontRule())
+    registry.register(CitationReferenceConsistencyRule())
     # 版面文本侧规则
     registry.register(TocPresencePdfRule())
+    registry.register(TocLevelPresentationPdfRule())
     registry.register(PageNumberPresencePdfRule())
+    registry.register(PageNumberBottomCenterPdfRule())
+    registry.register(PageNumberStyleSequencePdfRule())
+    registry.register(HeaderStartBoundaryPdfRule())
+    registry.register(HeaderTopContentPdfRule())
+    registry.register(ChapterStartsNewPagePdfRule())
     registry.register(FigureTableCaptionHintRule())
+    registry.register(FigureCaptionBelowPdfRule())
+    registry.register(FigureCaptionCenterPdfRule())
+    registry.register(TableCaptionAbovePdfRule())
+    registry.register(TableCaptionCenterPdfRule())
+    registry.register(FigureTableSplitAcrossPagesPdfRule())
 
     # 图像识别侧规则（占位）
     registry.register(OcrFallbackAvailabilityRule())
@@ -213,3 +253,8 @@ def create_default_hybrid_processor() -> HybridProcessor:
         merger=IssueMerger(),
         fix_planner=FixPlanner(),
     )
+
+
+STATUS_ONLY_RULE_IDS = {
+    "ocr.fallback.status",
+}

@@ -596,12 +596,43 @@ class FormatChecker:
             pass
 
         return [f for f in fonts if f]
+
+    def _get_paragraph_style_font_candidates(self, paragraph) -> list[str]:
+        fonts: list[str] = []
+        style = getattr(paragraph, "style", None)
+        if style is None:
+            return fonts
+
+        # 段落样式字体
+        try:
+            style_font = getattr(style, "font", None)
+            style_font_name = getattr(style_font, "name", None) if style_font else None
+            if style_font_name:
+                fonts.append(str(style_font_name))
+        except Exception:
+            pass
+
+        # 底层 XML 字体
+        try:
+            style_element = getattr(style, "_element", None)
+            rpr = getattr(style_element, "rPr", None) if style_element is not None else None
+            rfonts = getattr(rpr, "rFonts", None) if rpr is not None else None
+            if rfonts is not None:
+                for key in ("eastAsia", "ascii", "hAnsi", "cs"):
+                    value = rfonts.get(qn(f"w:{key}"))
+                    if value:
+                        fonts.append(str(value))
+        except Exception:
+            pass
+
+        return [f for f in fonts if f]
         
     def _check_font(self, paragraph, expected_font):
         """检查字体"""
         if not expected_font:
             return True
 
+        found_explicit_font = False
         for run in paragraph.runs:
             if run.text.strip() == "":
                 continue
@@ -609,10 +640,18 @@ class FormatChecker:
             candidate_fonts = self._get_run_font_candidates(run)
             if not candidate_fonts:
                 continue
+            found_explicit_font = True
 
             if not any(self._is_font_equivalent(expected_font, x) for x in candidate_fonts):
                 return False
-            
+
+        if found_explicit_font:
+            return True
+
+        style_fonts = self._get_paragraph_style_font_candidates(paragraph)
+        if style_fonts:
+            return any(self._is_font_equivalent(expected_font, x) for x in style_fonts)
+
         return True
         
     def _check_size(self, paragraph, expected_size):
