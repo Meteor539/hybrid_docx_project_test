@@ -1,3 +1,4 @@
+from model.pdf_engine.rules.cover_rules import CoverTitleCenterPdfRule
 from model.pdf_engine.rules.chapter_layout_rules import ChapterStartsNewPagePdfRule
 from model.pdf_engine.rules.figure_table_rules import (
     FigureCaptionBelowPdfRule,
@@ -7,6 +8,7 @@ from model.pdf_engine.rules.figure_table_rules import (
     TableCaptionCenterPdfRule,
     TableCaptionAbovePdfRule,
 )
+from model.pdf_engine.rules.formula_rules import FormulaNumberRightAlignedPdfRule
 from model.pdf_engine.rules.header_footer_rules import (
     HeaderStartBoundaryPdfRule,
     HeaderTopContentPdfRule,
@@ -18,6 +20,8 @@ from model.pdf_engine.rules.toc_rules import TocLevelPresentationPdfRule, TocPre
 
 __all__ = [
     "ChapterStartsNewPagePdfRule",
+    "CoverTitleCenterPdfRule",
+    "FormulaNumberRightAlignedPdfRule",
     "TocLevelPresentationPdfRule",
     "TocPresencePdfRule",
     "PageNumberPresencePdfRule",

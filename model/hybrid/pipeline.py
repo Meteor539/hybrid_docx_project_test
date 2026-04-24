@@ -9,13 +9,23 @@ from model.docx_engine.parser import DocxContextBuilder
 from model.docx_engine.rules import (
     AlignmentFormatRule,
     AppendixFormatRule,
+    HeadingNumberHierarchyRule,
+    NoteMarkerSuperscriptRule,
+    NoteMarkerConsistencyRule,
+    PageNumberFormatRule,
+    ReferenceAuthorCountRule,
     CatalogueHeadingConsistencyRule,
     CatalogueNumberFontRule,
     CaptionFormatRule,
+    CitationSuperscriptRule,
+    CharacterSpacingFormatRule,
     ChineseAbstractLengthRule,
     CoverTitleLengthRule,
     CitationReferenceConsistencyRule,
     FontSizeFormatRule,
+    FooterFormatRule,
+    FormulaAlignmentRule,
+    FormulaNumberRightAlignedRule,
     FirstStageSectionPresenceRule,
     FormulaNumberFormatRule,
     HeaderFormatRule,
@@ -24,6 +34,8 @@ from model.docx_engine.rules import (
     KeywordCountRule,
     LineSpacingFormatRule,
     PageSettingsRule,
+    ReferenceEntryFormatRule,
+    ReferenceNumberSequenceRule,
     ReferenceCountRule,
     ReferenceTerminalPeriodRule,
     SectionOrderRule,
@@ -33,6 +45,8 @@ from model.hybrid.router import RuleRouter
 from model.pdf_engine.extractor import PdfExtractor
 from model.pdf_engine.rules import (
     ChapterStartsNewPagePdfRule,
+    CoverTitleCenterPdfRule,
+    FormulaNumberRightAlignedPdfRule,
     HeaderStartBoundaryPdfRule,
     FigureCaptionBelowPdfRule,
     FigureCaptionCenterPdfRule,
@@ -201,19 +215,32 @@ def create_default_registry() -> RuleRegistry:
     registry.register(HeadingCitationRule())
     registry.register(ReferenceTerminalPeriodRule())
     registry.register(ReferenceCountRule())
+    registry.register(CitationSuperscriptRule())
+    registry.register(ReferenceEntryFormatRule())
+    registry.register(ReferenceNumberSequenceRule())
     registry.register(PageSettingsRule())
     registry.register(FontSizeFormatRule())
     registry.register(AlignmentFormatRule())
     registry.register(LineSpacingFormatRule())
+    registry.register(CharacterSpacingFormatRule())
+    registry.register(FormulaAlignmentRule())
+    registry.register(FormulaNumberRightAlignedRule())
     registry.register(FormulaNumberFormatRule())
     registry.register(HeaderFormatRule())
     registry.register(CaptionFormatRule())
     registry.register(AppendixFormatRule())
+    registry.register(HeadingNumberHierarchyRule())
+    registry.register(NoteMarkerSuperscriptRule())
+    registry.register(NoteMarkerConsistencyRule())
+    registry.register(FooterFormatRule())
+    registry.register(PageNumberFormatRule())
+    registry.register(ReferenceAuthorCountRule())
     registry.register(SectionOrderRule())
     registry.register(CatalogueHeadingConsistencyRule())
     registry.register(CatalogueNumberFontRule())
     registry.register(CitationReferenceConsistencyRule())
     # 版面文本侧规则
+    registry.register(CoverTitleCenterPdfRule())
     registry.register(TocPresencePdfRule())
     registry.register(TocLevelPresentationPdfRule())
     registry.register(PageNumberPresencePdfRule())
@@ -222,6 +249,7 @@ def create_default_registry() -> RuleRegistry:
     registry.register(HeaderStartBoundaryPdfRule())
     registry.register(HeaderTopContentPdfRule())
     registry.register(ChapterStartsNewPagePdfRule())
+    registry.register(FormulaNumberRightAlignedPdfRule())
     registry.register(FigureTableCaptionHintRule())
     registry.register(FigureCaptionBelowPdfRule())
     registry.register(FigureCaptionCenterPdfRule())

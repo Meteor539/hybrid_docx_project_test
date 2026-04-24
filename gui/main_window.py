@@ -992,66 +992,132 @@ class MainWindow(QMainWindow):
             source_layout = QFormLayout()
             lines = []
             for issue in source_issues:
-                severity = issue.get("severity", "info")
-                title = issue.get("title", "")
-                message = issue.get("message", "")
-                metadata = issue.get("metadata") or {}
-
-                line = f"[{severity}] {title}: {message}"
-
-                if source == "docx" and isinstance(metadata, dict):
-                    section = str(metadata.get("section") or "").strip()
-                    content = str(metadata.get("content") or "").strip()
-                    problem = str(metadata.get("problem") or "").strip()
-
-                    if section or content or problem:
-                        line = f"[{severity}]"
-                        if section:
-                            line += f" {section}"
-                        if content:
-                            content = content.replace("\n", " ")
-                            if len(content) > 120:
-                                content = content[:120] + "..."
-                            line += f"\n内容: {content}"
-                        if problem:
-                            line += f"\n问题: {problem}"
-                        lines.append(line)
-                        continue
-
-                    # docx 结果采用分行细节展示，同时保留告警级别
-                    line = f"[{severity}]"
-                    path = metadata.get("path")
-                    detail = metadata.get("detail")
-                    if path:
-                        line += f"\n路径: {path}"
-                    if isinstance(detail, dict):
-                        para_text = str(detail.get("段落") or detail.get("参考文献") or "").strip()
-                        if para_text:
-                            para_text = para_text.replace("\n", " ")
-                            if len(para_text) > 120:
-                                para_text = para_text[:120] + "..."
-                            line += f"\n段落: {para_text}"
-
-                        failed_items = []
-                        for k in ("字体", "字号", "对齐方式", "行间距"):
-                            if detail.get(k) is False:
-                                failed_items.append(k)
-                        if failed_items:
-                            line += f"\n问题项: {', '.join(failed_items)}"
-
-                        check_result = detail.get("检查结果")
-                        if isinstance(check_result, str) and check_result:
-                            line += f"\n说明: {check_result}"
-
-                    if line == f"[{severity}]":
-                        line = f"[{severity}] {title}"
-
-                lines.append(line)
+                lines.append(self.format_issue_block(issue))
             content_label = QLabel("\n".join(lines))
             content_label.setWordWrap(True)
             source_layout.addRow(content_label)
             source_widget.setLayout(source_layout)
             self.result_layout.addWidget(source_widget)
+
+    @staticmethod
+    def shorten_issue_text(text, limit=120):
+        text = str(text or "").replace("\n", " ").strip()
+        if len(text) > limit:
+            return text[:limit] + "..."
+        return text
+
+    def resolve_issue_section_label(self, issue):
+        metadata = issue.get("metadata") or {}
+        section = str(metadata.get("section") or "").strip()
+        title = str(issue.get("title") or "").strip()
+        rule_id = str(issue.get("rule_id") or "").strip()
+
+        section = self.normalize_issue_section_label(rule_id, section, title)
+        if section:
+            return section
+        return "未分类"
+
+    @staticmethod
+    def normalize_issue_section_label(rule_id, section, title):
+        rule_id = str(rule_id or "").strip()
+        section = str(section or "").strip()
+        title = str(title or "").strip()
+
+        if section in {"参考文献", "引文与参考文献"}:
+            if ".citation_reference_consistency." in rule_id and title == "引文与参考文献":
+                return "正文内容" if section != "参考文献" else "参考文献内容"
+            return "参考文献内容"
+
+        if section == "正文":
+            return "正文内容"
+
+        if section == "目录":
+            return "目录内容"
+
+        if section == "注释":
+            return "注释内容"
+
+        if section == "公式":
+            return "公式内容"
+
+        if title == "公式编号":
+            return "公式编号"
+
+        if title == "公式":
+            return "公式内容"
+
+        if title == "引文与参考文献":
+            return "正文内容"
+
+        if title == "参考文献":
+            return "参考文献内容"
+
+        if title == "目录":
+            return "目录内容"
+
+        if title == "注释":
+            return "注释内容"
+
+        return section or title
+
+    def resolve_issue_content_text(self, issue):
+        metadata = issue.get("metadata") or {}
+        original_content = metadata.get("original_content")
+        if original_content:
+            return self.shorten_issue_text(original_content)
+
+        content = metadata.get("content")
+        if content:
+            return self.shorten_issue_text(content)
+
+        detail = metadata.get("detail")
+        if isinstance(detail, dict):
+            para_text = detail.get("段落") or detail.get("参考文献") or detail.get("内容")
+            if para_text:
+                return self.shorten_issue_text(para_text)
+
+        message = issue.get("message")
+        if message:
+            return self.shorten_issue_text(message)
+        return "未提供"
+
+    def resolve_issue_problem_text(self, issue):
+        metadata = issue.get("metadata") or {}
+        problem = metadata.get("problem")
+        if problem:
+            detail = metadata.get("problem_detail")
+            if detail:
+                return self.shorten_issue_text(f"{problem}：{detail}", limit=200)
+            return self.shorten_issue_text(problem, limit=200)
+
+        detail = metadata.get("detail")
+        if isinstance(detail, dict):
+            failed_items = []
+            for k in ("字体", "字号", "对齐方式", "行间距"):
+                if detail.get(k) is False:
+                    failed_items.append(k)
+            if failed_items:
+                return f"以下项目可能不符合要求：{', '.join(failed_items)}"
+
+            check_result = detail.get("检查结果")
+            if isinstance(check_result, str) and check_result.strip():
+                return self.shorten_issue_text(check_result, limit=200)
+
+        message = issue.get("message")
+        if message:
+            return self.shorten_issue_text(message, limit=200)
+        return "未提供"
+
+    def format_issue_block(self, issue):
+        severity = str(issue.get("severity", "info")).strip().lower() or "info"
+        section = self.resolve_issue_section_label(issue)
+        content = self.resolve_issue_content_text(issue)
+        problem = self.resolve_issue_problem_text(issue)
+        return (
+            f"[{severity}] {section}\n"
+            f"出错内容：{content}\n"
+            f"错误描述：{problem}"
+        )
 
     def build_engine_status_lines(self, engine_counts, context_status, issues):
         """构建文档侧与图像侧执行状态。"""
