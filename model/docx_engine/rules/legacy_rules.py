@@ -1,3 +1,9 @@
+"""Legacy rule wrappers kept for reference.
+
+These wrappers are not registered in the current default rule registry.
+The active document-side pipeline uses the newer docx_engine rule set.
+"""
+
 from model.compat.legacy_format_adapter import LegacyFormatAdapter
 from model.core.base_rule import BaseRule
 from model.core.context import RuleContext

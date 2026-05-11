@@ -3,20 +3,7 @@ import re
 from model.core.base_rule import BaseRule
 from model.core.context import RuleContext
 from model.core.issue import Issue, Severity, Source
-
-
-def _normalize_text(text: str) -> str:
-    return re.sub(r"[\s\u3000]+", "", text or "")
-
-
-def _is_catalogue_page(page) -> bool:
-    normalized = _normalize_text(getattr(page, "text", ""))
-    if "目录" in normalized or "目錄" in normalized:
-        return True
-    raw_text = getattr(page, "text", "") or ""
-    dotted_entries = len(re.findall(r"[.．·•…\-_ ]{2,}\s*[IVXLCDMivxlcdm\d]+\s*$", raw_text, flags=re.MULTILINE))
-    numbered_entries = len(re.findall(r"^\s*(?:第\s*\d+\s*章|\d+\.\d+(?:\.\d+)?)", raw_text, flags=re.MULTILINE))
-    return dotted_entries >= 5 and numbered_entries >= 3
+from model.pdf_engine.page_roles import is_catalogue_page, normalize_text
 
 
 def _iter_text_lines(page):
@@ -66,7 +53,7 @@ def _is_chapter_heading_text(text: str) -> bool:
     if len(original) > 40:
         return False
 
-    compact = _normalize_text(original)
+    compact = normalize_text(original)
     if compact.lower().startswith("chapter"):
         return bool(re.fullmatch(r"chapter\d+.{1,30}", compact, flags=re.IGNORECASE))
 
@@ -128,7 +115,7 @@ class ChapterStartsNewPagePdfRule(BaseRule):
 
         issues: list[Issue] = []
         for page in pages:
-            if _is_catalogue_page(page):
+            if is_catalogue_page(page):
                 continue
 
             page_no = getattr(page, "page_no", None)

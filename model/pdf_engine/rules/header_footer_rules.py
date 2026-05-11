@@ -3,22 +3,23 @@ import re
 from model.core.base_rule import BaseRule
 from model.core.context import RuleContext
 from model.core.issue import Issue, Severity, Source
-
-
-PAGE_ROLE_OTHER = "other"
-PAGE_ROLE_CN_ABSTRACT = "cn_abstract"
-PAGE_ROLE_EN_ABSTRACT = "en_abstract"
-PAGE_ROLE_CATALOGUE = "catalogue"
-PAGE_ROLE_MAIN = "main"
-PAGE_ROLE_BACKMATTER = "backmatter"
-
-
-def _normalize_text(text: str) -> str:
-    return re.sub(r"[\s\u3000]+", "", text or "")
+from model.pdf_engine.page_roles import (
+    PAGE_ROLE_BACKMATTER,
+    PAGE_ROLE_CATALOGUE,
+    PAGE_ROLE_CN_ABSTRACT,
+    PAGE_ROLE_EN_ABSTRACT,
+    PAGE_ROLE_MAIN,
+    PAGE_ROLE_OTHER,
+    build_page_roles,
+    expected_page_number_kind,
+    is_catalogue_page,
+    normalize_text,
+    top_area_texts,
+)
 
 
 def _normalize_page_number_text(text: str) -> str:
-    normalized = _normalize_text(text)
+    normalized = normalize_text(text)
     normalized = normalized.strip("()（）[]【】")
     return normalized
 
@@ -77,128 +78,10 @@ def _roman_to_int(text: str) -> int | None:
     return total
 
 
-def _page_has_heading(page, keywords: tuple[str, ...]) -> bool:
-    normalized = _normalize_text(getattr(page, "text", ""))
-    return any(keyword in normalized for keyword in keywords)
-
-
-def _is_catalogue_page(page) -> bool:
-    normalized = _normalize_text(getattr(page, "text", ""))
-    if "目录" in normalized or "目錄" in normalized:
-        return True
-    raw_text = getattr(page, "text", "") or ""
-    dotted_entries = len(re.findall(r"[.．·•…\-_ ]{2,}\s*[IVXLCDMivxlcdm\d]+\s*$", raw_text, flags=re.MULTILINE))
-    numbered_entries = len(re.findall(r"^\s*(?:第\s*\d+\s*章|\d+\.\d+(?:\.\d+)?)", raw_text, flags=re.MULTILINE))
-    return dotted_entries >= 5 and numbered_entries >= 3
-
-
-def _looks_like_first_main_page(page) -> bool:
-    raw_text = getattr(page, "text", "") or ""
-    normalized = _normalize_text(raw_text)
-    if "第1章" in normalized or "第一章" in normalized:
-        return True
-    return bool(
-        re.search(
-            r"^\s*(?:1[.、\s]+(?:绪论|緒論)|第\s*1\s*章(?:\s|$)|第一章(?:\s|$)|(?:绪论|緒論)\s*$)",
-            raw_text,
-            flags=re.MULTILINE,
-        )
-    )
-
-
-def _build_page_roles(pages) -> dict[int, str]:
-    roles = {getattr(page, "page_no", idx + 1): PAGE_ROLE_OTHER for idx, page in enumerate(pages)}
-    if not pages:
-        return roles
-
-    for idx, page in enumerate(pages):
-        if _is_catalogue_page(page):
-            roles[getattr(page, "page_no", idx + 1)] = PAGE_ROLE_CATALOGUE
-
-    first_main_idx = None
-    for idx, page in enumerate(pages):
-        if roles.get(getattr(page, "page_no", idx + 1)) == PAGE_ROLE_CATALOGUE:
-            continue
-        if _looks_like_first_main_page(page):
-            first_main_idx = idx
-            break
-
-    if first_main_idx is None:
-        return roles
-
-    backmatter_indices = []
-    for idx in range(first_main_idx + 1, len(pages)):
-        if _looks_like_backmatter_start(pages[idx]):
-            backmatter_indices.append(idx)
-    main_end_idx = min(backmatter_indices) if backmatter_indices else len(pages)
-
-    for idx in range(first_main_idx, main_end_idx):
-        roles[getattr(pages[idx], "page_no", idx + 1)] = PAGE_ROLE_MAIN
-
-    for idx in range(main_end_idx, len(pages)):
-        page_no = getattr(pages[idx], "page_no", idx + 1)
-        if roles.get(page_no) == PAGE_ROLE_CATALOGUE:
-            continue
-        roles[page_no] = PAGE_ROLE_BACKMATTER
-
-    for idx in range(first_main_idx):
-        page = pages[idx]
-        page_no = getattr(page, "page_no", idx + 1)
-        if roles.get(page_no) == PAGE_ROLE_CATALOGUE:
-            continue
-        if _page_has_heading(page, ("摘要",)) and not _page_has_heading(page, ("ABSTRACT", "Abstract")):
-            roles[page_no] = PAGE_ROLE_CN_ABSTRACT
-        elif _page_has_heading(page, ("ABSTRACT", "Abstract")):
-            roles[page_no] = PAGE_ROLE_EN_ABSTRACT
-
-    return roles
-
-
-def _expected_page_number_kind(role: str) -> str | None:
-    if role in {PAGE_ROLE_CN_ABSTRACT, PAGE_ROLE_EN_ABSTRACT}:
-        return "roman"
-    if role in {PAGE_ROLE_MAIN, PAGE_ROLE_BACKMATTER}:
-        return "arabic"
-    return None
-
-
-def _top_area_texts(page) -> list[str]:
-    page_height = float(getattr(page, "height", 0.0) or 0.0)
-    if page_height <= 0:
-        return []
-
-    texts = []
-    for span in getattr(page, "spans", []):
-        text = getattr(span, "text", "").strip()
-        bbox = getattr(span, "bbox", None) or []
-        if not text or len(bbox) != 4:
-            continue
-        if float(bbox[3]) > page_height * 0.15:
-            continue
-        texts.append(text)
-    return texts
-
-
-def _looks_like_backmatter_start(page) -> bool:
-    top_texts = _top_area_texts(page)
-    if not top_texts:
-        return False
-
-    for text in top_texts[:6]:
-        compact = _normalize_text(text)
-        if not compact:
-            continue
-        if compact in {"参考文献", "致谢", "致謝"}:
-            return True
-        if re.fullmatch(r"附录[A-ZＡ-Ｚ]?", compact):
-            return True
-    return False
-
-
 def _top_area_has_expected_header(page, expected_header: str) -> tuple[bool, str]:
-    top_texts = _top_area_texts(page)
-    merged = _normalize_text("".join(top_texts))
-    expected = _normalize_text(expected_header)
+    top_texts = top_area_texts(page)
+    merged = normalize_text("".join(top_texts))
+    expected = normalize_text(expected_header)
     content = " ".join(top_texts[:5]).strip() or "未识别到顶部页眉文本"
     return (bool(expected and expected in merged), content)
 
@@ -214,12 +97,12 @@ class PageNumberPresencePdfRule(BaseRule):
         if not pages:
             return []
 
-        roles = _build_page_roles(pages)
+        roles = build_page_roles(pages)
         issues: list[Issue] = []
         for page in pages:
             page_no = getattr(page, "page_no", None)
             role = roles.get(page_no, PAGE_ROLE_OTHER)
-            expected_kind = _expected_page_number_kind(role)
+            expected_kind = expected_page_number_kind(role)
             if expected_kind is None:
                 continue
 
@@ -266,11 +149,11 @@ class PageNumberBottomCenterPdfRule(BaseRule):
         if not pages:
             return []
 
-        roles = _build_page_roles(pages)
+        roles = build_page_roles(pages)
         issues: list[Issue] = []
         for page in pages:
             page_no = getattr(page, "page_no", None)
-            if _expected_page_number_kind(roles.get(page_no, PAGE_ROLE_OTHER)) is None:
+            if expected_page_number_kind(roles.get(page_no, PAGE_ROLE_OTHER)) is None:
                 continue
 
             best = _best_page_number_candidate(page)
@@ -312,8 +195,8 @@ class HeaderTopContentPdfRule(BaseRule):
         if not pages:
             return []
 
-        roles = _build_page_roles(pages)
-        expected = _normalize_text(self.expected_header)
+        roles = build_page_roles(pages)
+        expected = normalize_text(self.expected_header)
         issues: list[Issue] = []
         for page in pages:
             page_no = getattr(page, "page_no", None)
@@ -357,7 +240,7 @@ class HeaderStartBoundaryPdfRule(BaseRule):
         if not pages:
             return []
 
-        roles = _build_page_roles(pages)
+        roles = build_page_roles(pages)
         main_pages = [getattr(page, "page_no", idx + 1) for idx, page in enumerate(pages) if roles.get(getattr(page, "page_no", idx + 1)) == PAGE_ROLE_MAIN]
         if not main_pages:
             return []
@@ -412,7 +295,7 @@ class PageNumberStyleSequencePdfRule(BaseRule):
         if not pages:
             return []
 
-        roles = _build_page_roles(pages)
+        roles = build_page_roles(pages)
         role_items = {
             PAGE_ROLE_CN_ABSTRACT: [],
             PAGE_ROLE_EN_ABSTRACT: [],
@@ -464,7 +347,7 @@ class PageNumberStyleSequencePdfRule(BaseRule):
             if role not in {PAGE_ROLE_CATALOGUE, PAGE_ROLE_OTHER}:
                 continue
 
-            if role == PAGE_ROLE_CATALOGUE and not _is_catalogue_page(page):
+            if role == PAGE_ROLE_CATALOGUE and not is_catalogue_page(page):
                 continue
 
             best = _best_page_number_candidate(page)

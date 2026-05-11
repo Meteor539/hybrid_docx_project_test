@@ -5,7 +5,6 @@ class IssueMerger:
     SOURCE_PRIORITY = {
         "docx": 3,
         "pdf": 2,
-        "ocr": 1,
         "hybrid": 0,
     }
 
@@ -27,4 +26,3 @@ class IssueMerger:
                     merged[key] = issue
 
         return list(merged.values())
-

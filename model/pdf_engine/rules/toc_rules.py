@@ -3,33 +3,14 @@ import re
 from model.core.base_rule import BaseRule
 from model.core.context import RuleContext
 from model.core.issue import Issue, Severity, Source
-
-
-def _normalize_text(text: str) -> str:
-    return re.sub(r"[\s\u3000]+", "", text or "")
-
-
-def _page_has_heading(page, keywords: tuple[str, ...]) -> bool:
-    normalized = _normalize_text(getattr(page, "text", ""))
-    return any(keyword in normalized for keyword in keywords)
-
-
-def _looks_like_catalogue_page(page) -> bool:
-    normalized = _normalize_text(getattr(page, "text", ""))
-    if "目录" in normalized or "目錄" in normalized:
-        return True
-
-    raw_text = getattr(page, "text", "") or ""
-    dotted_entries = len(re.findall(r"[.．·•…\-_ ]{2,}\s*[IVXLCDMivxlcdm\d]+\s*$", raw_text, flags=re.MULTILINE))
-    numbered_entries = len(re.findall(r"^\s*(?:第\s*\d+\s*章|\d+\.\d+(?:\.\d+)?)", raw_text, flags=re.MULTILINE))
-    return dotted_entries >= 5 and numbered_entries >= 3
+from model.pdf_engine.page_roles import is_catalogue_page, normalize_text, page_has_heading
 
 
 def _find_first_main_index(pages) -> int | None:
     for idx, page in enumerate(pages):
-        if _looks_like_catalogue_page(page):
+        if is_catalogue_page(page):
             continue
-        if _page_has_heading(page, ("第1章", "第一章", "绪论", "緒論")):
+        if page_has_heading(page, ("第1章", "第一章", "绪论", "緒論")):
             return idx
     return None
 
@@ -40,7 +21,7 @@ def _collect_catalogue_pages(pages):
 
     title_index = None
     for idx, page in enumerate(pages):
-        if "目录" in _normalize_text(getattr(page, "text", "")):
+        if "目录" in normalize_text(getattr(page, "text", "")):
             title_index = idx
             break
 
@@ -52,7 +33,7 @@ def _collect_catalogue_pages(pages):
     collected = []
     for idx in range(title_index, end_index):
         page = pages[idx]
-        if idx == title_index or _looks_like_catalogue_page(page):
+        if idx == title_index or is_catalogue_page(page):
             collected.append(page)
             continue
         break

@@ -62,8 +62,6 @@ from model.pdf_engine.rules import (
     TocLevelPresentationPdfRule,
     TocPresencePdfRule,
 )
-from model.vision_engine.analyzer import OcrAnalyzer
-from model.vision_engine.rules import OcrFallbackAvailabilityRule
 
 
 class HybridProcessor:
@@ -81,7 +79,6 @@ class HybridProcessor:
 
         self.docx_builder = DocxContextBuilder()
         self.pdf_extractor = PdfExtractor()
-        self.ocr_analyzer = OcrAnalyzer()
 
     def process(
         self,
@@ -149,10 +146,6 @@ class HybridProcessor:
         else:
             ctx.extras["pdf_path"] = None
             ctx.extras["pdf_extract_error"] = "PDF not provided"
-
-        ocr_pages, ocr_error = self.ocr_analyzer.analyze_images([])
-        ctx.ocr_pages = ocr_pages
-        ctx.extras["ocr_error"] = ocr_error
         return ctx
 
 
@@ -169,8 +162,6 @@ def rule_error_source(engine: str):
         return Source.DOCX
     if engine == "pdf":
         return Source.PDF
-    if engine == "ocr":
-        return Source.OCR
     return Source.HYBRID
 
 
@@ -259,8 +250,6 @@ def create_default_registry() -> RuleRegistry:
     registry.register(TableCaptionCenterPdfRule())
     registry.register(FigureTableSplitAcrossPagesPdfRule())
 
-    # 图像识别侧规则（占位）
-    registry.register(OcrFallbackAvailabilityRule())
     return registry
 
 
@@ -271,7 +260,6 @@ def build_context_status(extras: dict[str, Any]) -> dict[str, Any]:
         "docx_parts_order_count": len(extras.get("docx_parts_order") or []),
         "pdf_path": extras.get("pdf_path"),
         "pdf_extract_error": extras.get("pdf_extract_error"),
-        "ocr_error": extras.get("ocr_error"),
     }
 
 
@@ -285,6 +273,4 @@ def create_default_hybrid_processor() -> HybridProcessor:
     )
 
 
-STATUS_ONLY_RULE_IDS = {
-    "ocr.fallback.status",
-}
+STATUS_ONLY_RULE_IDS = set()

@@ -25,6 +25,16 @@ from model.format_modifier import FormatModifier
 from model import create_default_hybrid_processor
 from model.pdf_engine import DocxToPdfConverter
 from model.pdf_engine.extractor import PdfExtractor
+from model.pdf_engine.page_roles import (
+    PAGE_ROLE_BACKMATTER,
+    PAGE_ROLE_CATALOGUE,
+    PAGE_ROLE_CN_ABSTRACT,
+    PAGE_ROLE_EN_ABSTRACT,
+    PAGE_ROLE_MAIN,
+    PAGE_ROLE_OTHER,
+    build_page_roles,
+    is_catalogue_page,
+)
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -981,26 +991,12 @@ class MainWindow(QMainWindow):
 
         overview_widget = QGroupBox("检查概览")
         overview_layout = QFormLayout()
-        overview_text = (
-            f"总问题数：{summary.get('total', 0)}\n"
-            f"错误：{summary.get('errors', 0)}，警告：{summary.get('warnings', 0)}，提示：{summary.get('infos', 0)}\n"
-            f"各引擎问题数：{engine_counts}\n"
-            f"上下文状态：{context_status}"
-        )
+        overview_text = self.build_overview_text(summary, engine_counts, context_status)
         overview_label = QLabel(overview_text)
         overview_label.setWordWrap(True)
         overview_layout.addRow(overview_label)
         overview_widget.setLayout(overview_layout)
         self.result_layout.addWidget(overview_widget)
-
-        status_widget = QGroupBox("执行状态")
-        status_layout = QFormLayout()
-        for engine_name, status_text in self.build_engine_status_lines(engine_counts, context_status, issues):
-            status_label = QLabel(status_text)
-            status_label.setWordWrap(True)
-            status_layout.addRow(f"{engine_name}：", status_label)
-        status_widget.setLayout(status_layout)
-        self.result_layout.addWidget(status_widget)
 
         if not issues:
             no_issue_label = QLabel("未发现格式问题，但混合检查链路已执行。")
@@ -1191,51 +1187,34 @@ class MainWindow(QMainWindow):
             numbered.append(copied)
         return numbered
 
-    def build_engine_status_lines(self, engine_counts, context_status, issues):
-        """构建文档侧与图像侧执行状态。"""
+    def build_overview_text(self, summary, engine_counts, context_status):
+        """构建检查概览文本。"""
         docx_error = context_status.get("docx_parse_error")
         docx_parts_count = context_status.get("docx_parts_order_count", 0)
         pdf_path = context_status.get("pdf_path")
         pdf_error = context_status.get("pdf_extract_error")
-        ocr_error = context_status.get("ocr_error")
 
         docx_count = engine_counts.get("docx", 0)
         pdf_count = engine_counts.get("pdf", 0)
-        ocr_count = engine_counts.get("ocr", 0)
-
-        ocr_issues = [issue for issue in issues if issue.get("source") == "ocr"]
-        ocr_fallback_only = bool(ocr_issues) and all(
-            issue.get("rule_id") == "ocr.fallback.status" for issue in ocr_issues
-        )
 
         if docx_error:
-            docx_status = f"执行失败。文档解析出错：{docx_error}"
+            docx_status = f"DOCX 规则未完成检查：文档解析失败（{docx_error}）。"
         else:
-            docx_status = f"已执行。解析到 {docx_parts_count} 个板块，当前问题数 {docx_count}。"
+            docx_status = f"DOCX 规则已完成检查：解析到 {docx_parts_count} 个板块，发现问题 {docx_count}。"
 
-        image_parts = []
         if not pdf_path:
-            image_parts.append("PDF 页面分析未执行：未提供可用于页面分析的 PDF。")
+            pdf_status = "PDF 页面规则未执行检查：未提供可用于页面分析的 PDF。"
         elif pdf_error:
-            image_parts.append(f"PDF 页面分析失败：{pdf_error}")
+            pdf_status = f"PDF 页面规则未完成检查：页面提取失败（{pdf_error}）。"
         else:
-            image_parts.append(f"PDF 页面分析已执行，当前问题数 {pdf_count}。")
+            pdf_status = f"PDF 页面规则已完成检查：发现问题 {pdf_count}。"
 
-        if ocr_error:
-            image_parts.append(f"OCR 页面分析失败：{ocr_error}")
-        elif ocr_issues and not ocr_fallback_only:
-            image_parts.append(f"OCR 页面分析已执行，当前问题数 {ocr_count}。")
-        else:
-            image_parts.append("OCR 页面分析当前未真正接入，本轮未执行真实 OCR 检查。")
-
-        image_count = pdf_count
-        if ocr_issues and not ocr_fallback_only:
-            image_count += ocr_count
-
-        return [
-            ("DOCX", docx_status),
-            ("图像侧", " ".join(image_parts) + f" 图像侧合计问题数 {image_count}。"),
-        ]
+        return (
+            f"总问题数：{summary.get('total', 0)}\n"
+            f"错误：{summary.get('errors', 0)}，警告：{summary.get('warnings', 0)}，提示：{summary.get('infos', 0)}\n"
+            f"{docx_status}\n"
+            f"{pdf_status}"
+        )
 
     def get_issue_group_name(self, issue):
         """将 pdf/ocr 统一归并为图像侧展示。"""
@@ -1411,117 +1390,33 @@ class MainWindow(QMainWindow):
             lines.append({"text": text, "bbox": bbox})
         return lines
 
-    def top_area_texts(self, page):
-        page_height = float(getattr(page, "height", 0.0) or 0.0)
-        if page_height <= 0:
-            return []
-        texts = []
-        for span in getattr(page, "spans", []):
-            text = getattr(span, "text", "").strip()
-            bbox = getattr(span, "bbox", None) or []
-            if not text or len(bbox) != 4:
-                continue
-            if float(bbox[3]) > page_height * 0.15:
-                continue
-            texts.append(text)
-        return texts
-
-    def looks_like_first_main_page(self, page):
-        raw_text = getattr(page, "text", "") or ""
-        normalized = self.normalize_match_text(raw_text)
-        if "第1章" in normalized or "第一章" in normalized:
-            return True
-        return bool(
-            re.search(
-                r"^\s*(?:1[.、\s]+(?:绪论|緒論)|第\s*1\s*章(?:\s|$)|第一章(?:\s|$)|(?:绪论|緒論)\s*$)",
-                raw_text,
-                flags=re.MULTILINE,
-            )
-        )
-
-    def looks_like_backmatter_start(self, page):
-        top_texts = self.top_area_texts(page)
-        if not top_texts:
-            return False
-        for text in top_texts[:6]:
-            compact = self.normalize_match_text(text)
-            if compact in {"参考文献", "致谢", "致謝"}:
-                return True
-            if re.fullmatch(r"附录[A-ZＡ-Ｚ]?", compact):
-                return True
-        return False
-
     def build_pdf_page_roles(self, pdf_pages):
-        roles = {}
-        if not pdf_pages:
-            return roles
-
-        for idx, page in enumerate(pdf_pages, start=1):
-            page_no = int(getattr(page, "page_no", idx) or idx)
-            roles[page_no] = "other"
-
-        for idx, page in enumerate(pdf_pages, start=1):
-            page_no = int(getattr(page, "page_no", idx) or idx)
-            if self.is_catalogue_page(page):
-                roles[page_no] = "catalogue"
-
-        first_main_idx = None
-        for idx, page in enumerate(pdf_pages):
-            page_no = int(getattr(page, "page_no", idx + 1) or (idx + 1))
-            if roles.get(page_no) == "catalogue":
-                continue
-            if self.looks_like_first_main_page(page):
-                first_main_idx = idx
-                break
-
-        if first_main_idx is None:
-            return roles
-
-        backmatter_indices = []
-        for idx in range(first_main_idx + 1, len(pdf_pages)):
-            if self.looks_like_backmatter_start(pdf_pages[idx]):
-                backmatter_indices.append(idx)
-        main_end_idx = min(backmatter_indices) if backmatter_indices else len(pdf_pages)
-
-        for idx in range(first_main_idx, main_end_idx):
-            page_no = int(getattr(pdf_pages[idx], "page_no", idx + 1) or (idx + 1))
-            roles[page_no] = "main"
-
-        for idx in range(main_end_idx, len(pdf_pages)):
-            page_no = int(getattr(pdf_pages[idx], "page_no", idx + 1) or (idx + 1))
-            if roles.get(page_no) != "catalogue":
-                roles[page_no] = "backmatter"
-
-        for idx in range(first_main_idx):
-            page = pdf_pages[idx]
-            page_no = int(getattr(page, "page_no", idx + 1) or (idx + 1))
-            if roles.get(page_no) == "catalogue":
-                continue
-            normalized = self.normalize_match_text(getattr(page, "text", ""))
-            if "摘要" in normalized and "ABSTRACT" not in normalized.upper():
-                roles[page_no] = "cn_abstract"
-            elif "ABSTRACT" in getattr(page, "text", "") or "Abstract" in getattr(page, "text", ""):
-                roles[page_no] = "en_abstract"
-
-        return roles
+        return build_page_roles(pdf_pages)
 
     def allowed_roles_for_issue(self, issue):
         section_label = self.resolve_issue_section_label(issue)
         rule_id = str(issue.get("rule_id") or "")
         title = str(issue.get("title") or "")
         if section_label in {"中文摘要标题", "中文摘要内容", "中文关键词标题", "中文关键词内容", "摘要与关键词"}:
-            return {"cn_abstract"}
+            return {PAGE_ROLE_CN_ABSTRACT}
         if section_label in {"英文摘要标题", "英文摘要内容", "英文关键词标题", "英文关键词内容"}:
-            return {"en_abstract"}
+            return {PAGE_ROLE_EN_ABSTRACT}
         if section_label in {"目录", "目录内容", "目录标题"}:
-            return {"catalogue"}
+            return {PAGE_ROLE_CATALOGUE}
         if section_label in {"参考文献标题", "参考文献内容", "致谢标题", "致谢内容", "附录"}:
-            return {"backmatter"}
+            return {PAGE_ROLE_BACKMATTER}
         if "citation_superscript" in rule_id or title == "引文标识":
-            return {"main"}
+            return {PAGE_ROLE_MAIN}
         if section_label in {"页码", "页眉", "页脚"}:
-            return {"cn_abstract", "en_abstract", "main", "backmatter", "catalogue", "other"}
-        return {"main", "backmatter"}
+            return {
+                PAGE_ROLE_CN_ABSTRACT,
+                PAGE_ROLE_EN_ABSTRACT,
+                PAGE_ROLE_MAIN,
+                PAGE_ROLE_BACKMATTER,
+                PAGE_ROLE_CATALOGUE,
+                PAGE_ROLE_OTHER,
+            }
+        return {PAGE_ROLE_MAIN, PAGE_ROLE_BACKMATTER}
 
     @staticmethod
     def merge_bboxes(bboxes):
@@ -1557,6 +1452,33 @@ class MainWindow(QMainWindow):
                     }
                 )
         return windows
+
+    def iter_issue_candidate_pages(self, issue, pdf_pages, page_roles, *, avoid_catalogue=None):
+        allowed_roles = self.allowed_roles_for_issue(issue)
+        skip_catalogue = self.should_avoid_catalogue_for_issue(issue) if avoid_catalogue is None else avoid_catalogue
+        for page in pdf_pages:
+            page_no = int(getattr(page, "page_no", 0) or 0)
+            page_role = page_roles.get(page_no, PAGE_ROLE_OTHER)
+            if page_role not in allowed_roles:
+                continue
+            if skip_catalogue and is_catalogue_page(page):
+                continue
+            yield page, page_no
+
+    def iter_page_windows(self, page, *, max_window_size=4):
+        lines = self.group_page_lines(page)
+        for window in self.build_line_windows(lines, max_window_size=max_window_size):
+            yield window
+
+    @staticmethod
+    def choose_better_match(best_match, score, page_no, bbox):
+        if best_match is None or score > best_match["score"]:
+            return {
+                "page": page_no,
+                "bbox": [float(value) for value in bbox],
+                "score": score,
+            }
+        return best_match
 
     def build_issue_search_candidates(self, issue):
         candidates = []
@@ -1595,15 +1517,6 @@ class MainWindow(QMainWindow):
                 unique.append(clipped)
         return unique[:10]
 
-    def is_catalogue_page(self, page):
-        normalized = self.normalize_match_text(getattr(page, "text", ""))
-        if "目录" in normalized or "目錄" in normalized:
-            return True
-        raw_text = getattr(page, "text", "") or ""
-        dotted_entries = len(re.findall(r"[.．·•…\-_ ]{2,}\s*[IVXLCDMivxlcdm\d]+\s*$", raw_text, flags=re.MULTILINE))
-        numbered_entries = len(re.findall(r"^\s*(?:第\s*\d+\s*章|\d+\.\d+(?:\.\d+)?)", raw_text, flags=re.MULTILINE))
-        return dotted_entries >= 5 and numbered_entries >= 3
-
     def should_avoid_catalogue_for_issue(self, issue):
         section_label = self.resolve_issue_section_label(issue)
         rule_id = str(issue.get("rule_id") or "")
@@ -1614,35 +1527,31 @@ class MainWindow(QMainWindow):
             return False
         return True
 
-    def locate_docx_marker_bbox(self, issue, pdf_pages):
+    def locate_docx_marker_bbox(self, issue, pdf_pages, page_roles=None):
         metadata = issue.get("metadata") or {}
         marker = str(metadata.get("marker") or "").strip()
         if not marker:
             return None
 
-        page_roles = self.build_pdf_page_roles(pdf_pages)
-        allowed_roles = self.allowed_roles_for_issue(issue)
+        page_roles = page_roles or self.build_pdf_page_roles(pdf_pages)
         best_match = None
         normalized_marker = self.normalize_match_text(marker)
-        for page in pdf_pages:
-            page_no = int(getattr(page, "page_no", 0) or 0)
-            if page_roles.get(page_no, "other") not in allowed_roles:
-                continue
+        for page, page_no in self.iter_issue_candidate_pages(
+            issue,
+            pdf_pages,
+            page_roles,
+            avoid_catalogue=False,
+        ):
             for line in self.group_page_lines(page):
                 line_text = self.normalize_match_text(line["text"])
                 if normalized_marker not in line_text:
                     continue
                 start_pos = line_text.find(normalized_marker)
                 score = (len(normalized_marker) * 20) - (start_pos * 5)
-                if best_match is None or score > best_match["score"]:
-                    best_match = {
-                        "page": page_no,
-                        "bbox": [float(value) for value in line["bbox"]],
-                        "score": score,
-                    }
+                best_match = self.choose_better_match(best_match, score, page_no, line["bbox"])
         return best_match
 
-    def locate_reference_entry_boxes(self, issue, pdf_pages):
+    def locate_reference_entry_boxes(self, issue, pdf_pages, page_roles=None):
         section_label = self.resolve_issue_section_label(issue)
         if section_label != "参考文献内容":
             return []
@@ -1656,19 +1565,17 @@ class MainWindow(QMainWindow):
         if not entries:
             return []
 
-        page_roles = self.build_pdf_page_roles(pdf_pages)
+        page_roles = page_roles or self.build_pdf_page_roles(pdf_pages)
         locations = []
         for entry in entries:
             marker_match = re.match(r"^\s*(\[\d+\])", entry)
             marker = marker_match.group(1) if marker_match else None
             normalized_entry = self.normalize_match_text(entry)
             best_match = None
-            for page in pdf_pages:
-                page_no = int(getattr(page, "page_no", 0) or 0)
-                if page_roles.get(page_no) != "backmatter":
+            for page, page_no in self.iter_issue_candidate_pages(issue, pdf_pages, page_roles, avoid_catalogue=False):
+                if page_roles.get(page_no) != PAGE_ROLE_BACKMATTER:
                     continue
-                lines = self.group_page_lines(page)
-                for window in self.build_line_windows(lines, max_window_size=6):
+                for window in self.iter_page_windows(page, max_window_size=6):
                     line_text = self.normalize_match_text(window["text"])
                     if len(line_text) < 4:
                         continue
@@ -1689,18 +1596,14 @@ class MainWindow(QMainWindow):
                     if score is None:
                         continue
 
-                    if best_match is None or score > best_match["score"]:
-                        best_match = {
-                            "page": page_no,
-                            "bbox": [float(value) for value in window["bbox"]],
-                            "score": score,
-                        }
+                    best_match = self.choose_better_match(best_match, score, page_no, window["bbox"])
             if best_match is not None:
                 locations.append(best_match)
         return locations
 
-    def locate_docx_issue_bbox(self, issue, pdf_pages):
-        marker_located = self.locate_docx_marker_bbox(issue, pdf_pages)
+    def locate_docx_issue_bbox(self, issue, pdf_pages, page_roles=None):
+        page_roles = page_roles or self.build_pdf_page_roles(pdf_pages)
+        marker_located = self.locate_docx_marker_bbox(issue, pdf_pages, page_roles=page_roles)
         if marker_located is not None:
             return marker_located
 
@@ -1710,19 +1613,9 @@ class MainWindow(QMainWindow):
 
         section_label = self.resolve_issue_section_label(issue)
         allow_header_footer = section_label in {"页码", "页眉", "页脚"}
-        avoid_catalogue = self.should_avoid_catalogue_for_issue(issue)
-        page_roles = self.build_pdf_page_roles(pdf_pages)
-        allowed_roles = self.allowed_roles_for_issue(issue)
         best_match = None
-        for page in pdf_pages:
-            page_no = int(getattr(page, "page_no", 0) or 0)
-            page_role = page_roles.get(page_no, "other")
-            if page_role not in allowed_roles:
-                continue
-            if avoid_catalogue and self.is_catalogue_page(page):
-                continue
-            lines = self.group_page_lines(page)
-            for line in self.build_line_windows(lines):
+        for page, page_no in self.iter_issue_candidate_pages(issue, pdf_pages, page_roles):
+            for line in self.iter_page_windows(page):
                 line_text = self.normalize_match_text(line["text"])
                 if len(line_text) < 4:
                     continue
@@ -1745,17 +1638,13 @@ class MainWindow(QMainWindow):
                             - ((line.get("line_count", 1) - 1) * 6)
                             - (start_pos * 3)
                         )
-                        if best_match is None or score > best_match["score"]:
-                            best_match = {
-                                "page": page_no,
-                                "bbox": [float(value) for value in line["bbox"]],
-                                "score": score,
-                            }
+                        best_match = self.choose_better_match(best_match, score, page_no, line["bbox"])
         return best_match
 
     def collect_visual_issues(self, issues, pdf_pages):
         """筛选并补齐可用于页面标注的问题。"""
         visual_issues = []
+        page_roles = self.build_pdf_page_roles(pdf_pages)
         for issue in issues:
             source = issue.get("source")
             page = issue.get("page")
@@ -1775,7 +1664,7 @@ class MainWindow(QMainWindow):
             if source != "docx":
                 continue
 
-            reference_locations = self.locate_reference_entry_boxes(issue, pdf_pages)
+            reference_locations = self.locate_reference_entry_boxes(issue, pdf_pages, page_roles=page_roles)
             if reference_locations:
                 for idx, located in enumerate(reference_locations, start=1):
                     visual_issue = dict(issue)
@@ -1786,7 +1675,7 @@ class MainWindow(QMainWindow):
                     visual_issues.append(visual_issue)
                 continue
 
-            located = self.locate_docx_issue_bbox(issue, pdf_pages)
+            located = self.locate_docx_issue_bbox(issue, pdf_pages, page_roles=page_roles)
             if not located:
                 continue
 
