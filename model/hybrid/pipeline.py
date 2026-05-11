@@ -53,6 +53,7 @@ from model.pdf_engine.rules import (
     FigureTableCaptionHintRule,
     FigureTableSplitAcrossPagesPdfRule,
     HeaderTopContentPdfRule,
+    NoteMarkerPositionPdfRule,
     PageNumberBottomCenterPdfRule,
     PageNumberPresencePdfRule,
     PageNumberStyleSequencePdfRule,
@@ -250,6 +251,7 @@ def create_default_registry() -> RuleRegistry:
     registry.register(HeaderTopContentPdfRule())
     registry.register(ChapterStartsNewPagePdfRule())
     registry.register(FormulaNumberRightAlignedPdfRule())
+    registry.register(NoteMarkerPositionPdfRule())
     registry.register(FigureTableCaptionHintRule())
     registry.register(FigureCaptionBelowPdfRule())
     registry.register(FigureCaptionCenterPdfRule())

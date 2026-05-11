@@ -16,12 +16,14 @@ from model.pdf_engine.rules.header_footer_rules import (
     PageNumberPresencePdfRule,
     PageNumberStyleSequencePdfRule,
 )
+from model.pdf_engine.rules.note_rules import NoteMarkerPositionPdfRule
 from model.pdf_engine.rules.toc_rules import TocLevelPresentationPdfRule, TocPresencePdfRule
 
 __all__ = [
     "ChapterStartsNewPagePdfRule",
     "CoverTitleCenterPdfRule",
     "FormulaNumberRightAlignedPdfRule",
+    "NoteMarkerPositionPdfRule",
     "TocLevelPresentationPdfRule",
     "TocPresencePdfRule",
     "PageNumberPresencePdfRule",

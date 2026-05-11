@@ -10,6 +10,7 @@ PAGE_ROLE_CN_ABSTRACT = "cn_abstract"
 PAGE_ROLE_EN_ABSTRACT = "en_abstract"
 PAGE_ROLE_CATALOGUE = "catalogue"
 PAGE_ROLE_MAIN = "main"
+PAGE_ROLE_BACKMATTER = "backmatter"
 
 
 def _normalize_text(text: str) -> str:
@@ -85,8 +86,24 @@ def _is_catalogue_page(page) -> bool:
     normalized = _normalize_text(getattr(page, "text", ""))
     if "目录" in normalized or "目錄" in normalized:
         return True
-    dotted_entries = len(re.findall(r"\d+\.\d+|\d+$", getattr(page, "text", ""), flags=re.MULTILINE))
-    return dotted_entries >= 8 and "第1章" in normalized
+    raw_text = getattr(page, "text", "") or ""
+    dotted_entries = len(re.findall(r"[.．·•…\-_ ]{2,}\s*[IVXLCDMivxlcdm\d]+\s*$", raw_text, flags=re.MULTILINE))
+    numbered_entries = len(re.findall(r"^\s*(?:第\s*\d+\s*章|\d+\.\d+(?:\.\d+)?)", raw_text, flags=re.MULTILINE))
+    return dotted_entries >= 5 and numbered_entries >= 3
+
+
+def _looks_like_first_main_page(page) -> bool:
+    raw_text = getattr(page, "text", "") or ""
+    normalized = _normalize_text(raw_text)
+    if "第1章" in normalized or "第一章" in normalized:
+        return True
+    return bool(
+        re.search(
+            r"^\s*(?:1[.、\s]+(?:绪论|緒論)|第\s*1\s*章(?:\s|$)|第一章(?:\s|$)|(?:绪论|緒論)\s*$)",
+            raw_text,
+            flags=re.MULTILINE,
+        )
+    )
 
 
 def _build_page_roles(pages) -> dict[int, str]:
@@ -102,7 +119,7 @@ def _build_page_roles(pages) -> dict[int, str]:
     for idx, page in enumerate(pages):
         if roles.get(getattr(page, "page_no", idx + 1)) == PAGE_ROLE_CATALOGUE:
             continue
-        if _page_has_heading(page, ("第1章", "第一章", "绪论", "緒論")):
+        if _looks_like_first_main_page(page):
             first_main_idx = idx
             break
 
@@ -111,12 +128,18 @@ def _build_page_roles(pages) -> dict[int, str]:
 
     backmatter_indices = []
     for idx in range(first_main_idx + 1, len(pages)):
-        if _page_has_heading(pages[idx], ("参考文献", "附录", "附錄", "致谢", "致謝")):
+        if _looks_like_backmatter_start(pages[idx]):
             backmatter_indices.append(idx)
     main_end_idx = min(backmatter_indices) if backmatter_indices else len(pages)
 
     for idx in range(first_main_idx, main_end_idx):
         roles[getattr(pages[idx], "page_no", idx + 1)] = PAGE_ROLE_MAIN
+
+    for idx in range(main_end_idx, len(pages)):
+        page_no = getattr(pages[idx], "page_no", idx + 1)
+        if roles.get(page_no) == PAGE_ROLE_CATALOGUE:
+            continue
+        roles[page_no] = PAGE_ROLE_BACKMATTER
 
     for idx in range(first_main_idx):
         page = pages[idx]
@@ -134,7 +157,7 @@ def _build_page_roles(pages) -> dict[int, str]:
 def _expected_page_number_kind(role: str) -> str | None:
     if role in {PAGE_ROLE_CN_ABSTRACT, PAGE_ROLE_EN_ABSTRACT}:
         return "roman"
-    if role == PAGE_ROLE_MAIN:
+    if role in {PAGE_ROLE_MAIN, PAGE_ROLE_BACKMATTER}:
         return "arabic"
     return None
 
@@ -154,6 +177,22 @@ def _top_area_texts(page) -> list[str]:
             continue
         texts.append(text)
     return texts
+
+
+def _looks_like_backmatter_start(page) -> bool:
+    top_texts = _top_area_texts(page)
+    if not top_texts:
+        return False
+
+    for text in top_texts[:6]:
+        compact = _normalize_text(text)
+        if not compact:
+            continue
+        if compact in {"参考文献", "致谢", "致謝"}:
+            return True
+        if re.fullmatch(r"附录[A-ZＡ-Ｚ]?", compact):
+            return True
+    return False
 
 
 def _top_area_has_expected_header(page, expected_header: str) -> tuple[bool, str]:
@@ -188,7 +227,15 @@ class PageNumberPresencePdfRule(BaseRule):
             if best is not None:
                 continue
 
-            role_name = "中文摘要" if role == PAGE_ROLE_CN_ABSTRACT else "英文摘要" if role == PAGE_ROLE_EN_ABSTRACT else "正文"
+            role_name = (
+                "中文摘要"
+                if role == PAGE_ROLE_CN_ABSTRACT
+                else "英文摘要"
+                if role == PAGE_ROLE_EN_ABSTRACT
+                else "正文后置部分"
+                if role == PAGE_ROLE_BACKMATTER
+                else "正文"
+            )
             issues.append(
                 Issue(
                     rule_id=self.rule_id,
@@ -370,6 +417,7 @@ class PageNumberStyleSequencePdfRule(BaseRule):
             PAGE_ROLE_CN_ABSTRACT: [],
             PAGE_ROLE_EN_ABSTRACT: [],
             PAGE_ROLE_MAIN: [],
+            PAGE_ROLE_BACKMATTER: [],
         }
 
         for page in pages:
@@ -390,9 +438,57 @@ class PageNumberStyleSequencePdfRule(BaseRule):
             )
 
         issues: list[Issue] = []
+        issues.extend(self._check_unexpected_sections(pages, roles))
         issues.extend(self._check_roman_section(role_items[PAGE_ROLE_CN_ABSTRACT], "中文摘要"))
         issues.extend(self._check_roman_section(role_items[PAGE_ROLE_EN_ABSTRACT], "英文摘要"))
-        issues.extend(self._check_arabic_section(role_items[PAGE_ROLE_MAIN]))
+        arabic_items = sorted(
+            role_items[PAGE_ROLE_MAIN] + role_items[PAGE_ROLE_BACKMATTER],
+            key=lambda item: item["page_no"],
+        )
+        issues.extend(self._check_arabic_section(arabic_items))
+        return issues
+
+    def _check_unexpected_sections(self, pages, roles: dict[int, str]) -> list[Issue]:
+        issues: list[Issue] = []
+        has_main_pages = any(role == PAGE_ROLE_MAIN for role in roles.values())
+        if not has_main_pages:
+            return issues
+
+        role_name_map = {
+            PAGE_ROLE_CATALOGUE: "目录",
+            PAGE_ROLE_OTHER: "第1章前置部分",
+        }
+        for page in pages:
+            page_no = getattr(page, "page_no", None)
+            role = roles.get(page_no, PAGE_ROLE_OTHER)
+            if role not in {PAGE_ROLE_CATALOGUE, PAGE_ROLE_OTHER}:
+                continue
+
+            if role == PAGE_ROLE_CATALOGUE and not _is_catalogue_page(page):
+                continue
+
+            best = _best_page_number_candidate(page)
+            if best is None:
+                continue
+
+            role_name = role_name_map.get(role, "第1章前置部分")
+            issues.append(
+                Issue(
+                    rule_id=f"{self.rule_id}.unexpected.{page_no}",
+                    title="页码",
+                    message=f"第{page_no}页属于{role_name}，但页面底端识别到页码“{best['text']}”。",
+                    severity=Severity.INFO,
+                    source=Source.PDF,
+                    page=page_no,
+                    bbox=[int(x) for x in best["bbox"]],
+                    fixable=False,
+                    metadata={
+                        "section": "页码",
+                        "content": best["text"],
+                        "problem": f"{role_name}疑似不应编排页码",
+                    },
+                )
+            )
         return issues
 
     def _check_roman_section(self, items: list[dict], section_name: str) -> list[Issue]:

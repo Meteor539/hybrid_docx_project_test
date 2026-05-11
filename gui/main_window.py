@@ -1,18 +1,30 @@
 import json
+import re
 from typing import Dict
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QFileDialog, QLabel, QScrollArea,
                              QGroupBox, QFormLayout, QTabWidget, QComboBox,
                              QGroupBox, QFormLayout, QTabWidget, QComboBox,
+                             QSpinBox, QSizePolicy, QListWidget, QListWidgetItem,
                              QMessageBox)
 from PyQt6.QtCore import Qt, QMimeData
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent
+from PyQt6.QtGui import (
+    QDragEnterEvent,
+    QDropEvent,
+    QPixmap,
+    QImage,
+    QPainter,
+    QColor,
+    QPen,
+    QFont,
+)
 import os
 from model.document_parser import DocumentParser
 from model.format_checker import FormatChecker
 from model.format_modifier import FormatModifier
 from model import create_default_hybrid_processor
 from model.pdf_engine import DocxToPdfConverter
+from model.pdf_engine.extractor import PdfExtractor
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -38,7 +50,7 @@ class MainWindow(QMainWindow):
             "中度网格 - 强调文字颜色 3", "深色列表"
         ]
 
-        self.setWindowTitle("Word文档格式检查与修改软件")
+        self.setWindowTitle("Word文档格式检查系统")
         self.setMinimumSize(800, 600)
         
         # 启用拖拽
@@ -50,14 +62,32 @@ class MainWindow(QMainWindow):
         self.modifier = FormatModifier()
         self.hybrid_processor = create_default_hybrid_processor()
         self.docx_to_pdf_converter = DocxToPdfConverter()
+        self.pdf_extractor = PdfExtractor()
         self.generated_pdf_path = None
+        self.visual_issue_state = None
+        self.issue_widget_map = {}
         
         # 创建主窗口部件
         self.main_widget = QWidget()
         self.setCentralWidget(self.main_widget)
         
         # 创建主布局
-        self.main_layout = QVBoxLayout(self.main_widget)
+        self.main_layout = QHBoxLayout(self.main_widget)
+        self.main_layout.setContentsMargins(8, 8, 8, 8)
+        self.main_layout.setSpacing(10)
+
+        self.left_panel_widget = QWidget()
+        self.left_panel_layout = QVBoxLayout(self.left_panel_widget)
+        self.left_panel_layout.setContentsMargins(0, 0, 0, 0)
+        self.left_panel_layout.setSpacing(8)
+
+        self.right_panel_widget = QWidget()
+        self.right_panel_layout = QVBoxLayout(self.right_panel_widget)
+        self.right_panel_layout.setContentsMargins(0, 0, 0, 0)
+        self.right_panel_layout.setSpacing(8)
+
+        self.main_layout.addWidget(self.left_panel_widget, 5)
+        self.main_layout.addWidget(self.right_panel_widget, 6)
         
         # 创建文件操作区
         self.create_file_operation_area()
@@ -74,12 +104,11 @@ class MainWindow(QMainWindow):
     def create_file_operation_area(self):
         """创建文件操作区域"""
         file_group = QGroupBox("文件操作")
-        file_layout = QVBoxLayout()  # 改为垂直布局以添加提示文本
-        
-        # 添加拖拽提示
-        drag_hint = QLabel("将Word文档拖拽到此处，或点击下方按钮选择")
-        drag_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        file_layout.addWidget(drag_hint)
+        file_layout = QVBoxLayout()
+
+        self.document_check_btn = QPushButton("文档检查")
+        self.document_check_btn.clicked.connect(self.hybrid_check)
+        file_layout.addWidget(self.document_check_btn)
         
         # 文件操作按钮区域
         button_area = QHBoxLayout()
@@ -104,7 +133,7 @@ class MainWindow(QMainWindow):
         # 设置文件操作区接受拖拽
         file_group.setAcceptDrops(True)
         
-        self.main_layout.addWidget(file_group)
+        self.right_panel_layout.addWidget(file_group)
         
     def dragEnterEvent(self, event: QDragEnterEvent):
         """处理拖拽进入事件"""
@@ -167,7 +196,8 @@ class MainWindow(QMainWindow):
         
         settings_layout.addWidget(self.tab_widget)
         settings_group.setLayout(settings_layout)
-        self.main_layout.addWidget(settings_group)
+        settings_group.setMaximumHeight(280)
+        self.right_panel_layout.addWidget(settings_group)
 
     def create_combo_box(self, section, layout, label, key):
         self.format_combos[section][key] = QComboBox()
@@ -646,43 +676,41 @@ class MainWindow(QMainWindow):
         
     def create_operation_buttons(self):
         """创建操作按钮区域"""
-        button_layout = QHBoxLayout()
-        
-        self.check_btn = QPushButton("检查格式")
-        self.check_btn.clicked.connect(self.check_format)
-
-        self.order_check_btn = QPushButton("检查排版顺序")
-        self.order_check_btn.clicked.connect(self.check_order)
-
-        self.hybrid_check_btn = QPushButton("混合检查")
-        self.hybrid_check_btn.clicked.connect(self.hybrid_check)
-        
-        self.modify_btn = QPushButton("确认修改")
-        self.modify_btn.clicked.connect(self.modify_format)
-        
-        button_layout.addWidget(self.check_btn)
-        button_layout.addWidget(self.order_check_btn)
-        button_layout.addWidget(self.hybrid_check_btn)
-        button_layout.addWidget(self.modify_btn)
-        
-        self.main_layout.addLayout(button_layout)
+        return
         
     def create_result_area(self):
         """创建检查结果区域"""
-        result_group = QGroupBox("检查结果（结果仅供参考）")
-        result_layout = QVBoxLayout()
-        
+        self.visual_result_group = QGroupBox("结果可视化")
+        self.visual_result_layout = QVBoxLayout()
+        self.visual_result_layout.setContentsMargins(6, 6, 6, 6)
+        self.visual_result_layout.setSpacing(6)
+        self.visual_layout = self.visual_result_layout
+        self.visual_result_group.setLayout(self.visual_result_layout)
+
+        self.text_result_group = QGroupBox("检查结果（结果仅供参考）")
+        self.text_result_layout = QVBoxLayout()
         self.result_scroll = QScrollArea()
         self.result_widget = QWidget()
         self.result_layout = QVBoxLayout(self.result_widget)
-        
+        self.result_layout.setContentsMargins(0, 0, 0, 0)
         self.result_scroll.setWidget(self.result_widget)
         self.result_scroll.setWidgetResizable(True)
-        
-        result_layout.addWidget(self.result_scroll)
-        result_group.setLayout(result_layout)
-        
-        self.main_layout.addWidget(result_group)
+        self.text_result_layout.addWidget(self.result_scroll)
+        self.text_result_group.setLayout(self.text_result_layout)
+
+        self.left_panel_layout.addWidget(self.visual_result_group, 1)
+        self.right_panel_layout.addWidget(self.text_result_group, 1)
+
+    @staticmethod
+    def clear_qt_layout(layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            child_layout = item.layout()
+            if widget is not None:
+                widget.deleteLater()
+            elif child_layout is not None:
+                MainWindow.clear_qt_layout(child_layout)
         
     def select_file(self):
         """选择文件"""
@@ -914,11 +942,9 @@ class MainWindow(QMainWindow):
         
     def display_results(self, results):
         """显示检查结果"""
-        # 清空现有结果
-        while self.result_layout.count():
-            item = self.result_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        self.clear_qt_layout(self.result_layout)
+        self.clear_qt_layout(self.visual_layout)
+        self.issue_widget_map = {}
                 
         # 添加新结果
         for section, result in results.items():
@@ -941,15 +967,17 @@ class MainWindow(QMainWindow):
 
     def display_hybrid_results(self, result):
         """显示混合检查结果"""
-        while self.result_layout.count():
-            item = self.result_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        self.clear_qt_layout(self.result_layout)
+        self.clear_qt_layout(self.visual_layout)
+        self.issue_widget_map = {}
 
         summary = result.get("summary", {})
         engine_counts = result.get("engine_counts", {})
         context_status = result.get("context_status", {})
-        issues = result.get("issues", [])
+        issues = self.sort_and_number_issues(result.get("issues", []))
+
+        visualization_widget = self.create_issue_visualization_widget(context_status, issues)
+        self.visual_layout.addWidget(visualization_widget)
 
         overview_widget = QGroupBox("检查概览")
         overview_layout = QFormLayout()
@@ -975,29 +1003,21 @@ class MainWindow(QMainWindow):
         self.result_layout.addWidget(status_widget)
 
         if not issues:
-            no_issue_label = QLabel("✓ 未发现格式问题")
+            no_issue_label = QLabel("未发现格式问题，但混合检查链路已执行。")
             no_issue_label.setStyleSheet("color: green; font-weight: bold; font-size: 14px;")
             no_issue_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            no_issue_label.setText("未发现格式问题，但混合检查链路已执行。")
             self.result_layout.addWidget(no_issue_label)
             return
 
-        grouped = {}
+        issue_widget = QGroupBox("问题列表")
+        issue_layout = QVBoxLayout()
         for issue in issues:
-            source = self.get_issue_group_name(issue)
-            grouped.setdefault(source, []).append(issue)
-
-        for source, source_issues in grouped.items():
-            source_widget = QGroupBox(f"{source} 检查结果")
-            source_layout = QFormLayout()
-            lines = []
-            for issue in source_issues:
-                lines.append(self.format_issue_block(issue))
-            content_label = QLabel("\n".join(lines))
-            content_label.setWordWrap(True)
-            source_layout.addRow(content_label)
-            source_widget.setLayout(source_layout)
-            self.result_layout.addWidget(source_widget)
+            issue_item_widget = self.create_issue_item_widget(issue)
+            issue_layout.addWidget(issue_item_widget)
+            self.issue_widget_map[issue.get("display_index")] = issue_item_widget
+        issue_widget.setLayout(issue_layout)
+        self.result_layout.addWidget(issue_widget)
+        self.result_layout.addStretch(1)
 
     @staticmethod
     def shorten_issue_text(text, limit=120):
@@ -1109,15 +1129,67 @@ class MainWindow(QMainWindow):
         return "未提供"
 
     def format_issue_block(self, issue):
+        index = issue.get("display_index", "")
         severity = str(issue.get("severity", "info")).strip().lower() or "info"
         section = self.resolve_issue_section_label(issue)
         content = self.resolve_issue_content_text(issue)
         problem = self.resolve_issue_problem_text(issue)
         return (
-            f"[{severity}] {section}\n"
+            f"{index}. [{severity}] {section}\n"
             f"出错内容：{content}\n"
             f"错误描述：{problem}"
         )
+
+    def create_issue_item_widget(self, issue):
+        widget = QGroupBox()
+        widget.setObjectName(f"issue-{issue.get('display_index')}")
+        widget.setStyleSheet(
+            "QGroupBox {"
+            "border: 1px solid #d9d9d9;"
+            "border-radius: 6px;"
+            "margin-top: 4px;"
+            "padding: 6px;"
+            "background-color: #ffffff;"
+            "}"
+        )
+        layout = QVBoxLayout()
+        content_label = QLabel(self.format_issue_block(issue))
+        content_label.setWordWrap(True)
+        content_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout.addWidget(content_label)
+        widget.setLayout(layout)
+        widget.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        def handle_click(_event, target_issue=issue):
+            self.navigate_to_issue(target_issue)
+
+        widget.mousePressEvent = handle_click
+        content_label.mousePressEvent = handle_click
+        return widget
+
+    @staticmethod
+    def sort_and_number_issues(issues):
+        def sort_key(issue):
+            page = issue.get("page")
+            has_page = isinstance(page, int) and page > 0
+            rule_id = str(issue.get("rule_id") or "")
+            section = str((issue.get("metadata") or {}).get("section") or "")
+            title = str(issue.get("title") or "")
+            return (
+                0 if has_page else 1,
+                int(page) if has_page else 10**9,
+                rule_id,
+                section,
+                title,
+            )
+
+        sorted_issues = sorted(list(issues or []), key=sort_key)
+        numbered = []
+        for index, issue in enumerate(sorted_issues, start=1):
+            copied = dict(issue)
+            copied["display_index"] = index
+            numbered.append(copied)
+        return numbered
 
     def build_engine_status_lines(self, engine_counts, context_status, issues):
         """构建文档侧与图像侧执行状态。"""
@@ -1173,6 +1245,742 @@ class MainWindow(QMainWindow):
         if source in {"pdf", "ocr"}:
             return "图像侧"
         return source
+
+    def create_issue_visualization_widget(self, context_status, issues):
+        """创建错误位置可视化区域。"""
+        visual_widget = QWidget()
+        visual_layout = QVBoxLayout()
+        visual_layout.setContentsMargins(0, 0, 0, 0)
+        visual_layout.setSpacing(4)
+        visual_widget.setLayout(visual_layout)
+
+        pdf_path = str(context_status.get("pdf_path") or "").strip()
+        if not pdf_path or not os.path.exists(pdf_path):
+            hint_label = QLabel("当前没有可用于标注的 PDF，无法生成页面可视化。")
+            hint_label.setWordWrap(True)
+            visual_layout.addWidget(hint_label)
+            return visual_widget
+
+        pdf_pages, pdf_error = self.pdf_extractor.extract(pdf_path)
+        if pdf_error:
+            hint_label = QLabel(f"PDF 页面提取失败，无法生成标注：{pdf_error}")
+            hint_label.setWordWrap(True)
+            visual_layout.addWidget(hint_label)
+            return visual_widget
+
+        visual_issues = self.collect_visual_issues(issues, pdf_pages)
+
+        total_pages = len(pdf_pages)
+        page_numbers = list(range(1, total_pages + 1))
+        if not page_numbers:
+            hint_label = QLabel("当前没有可切换展示的标注页。")
+            hint_label.setWordWrap(True)
+            visual_layout.addWidget(hint_label)
+            return visual_widget
+
+        self.visual_issue_state = {
+            "pdf_path": pdf_path,
+            "pdf_pages": pdf_pages,
+            "issues": visual_issues,
+            "page_numbers": page_numbers,
+            "total_pages": total_pages,
+            "zoom": 1.6,
+        }
+
+        control_layout = QHBoxLayout()
+        control_layout.setContentsMargins(0, 0, 0, 0)
+        control_layout.setSpacing(6)
+        page_label = QLabel("页码：")
+        page_spin = QSpinBox()
+        page_spin.setMinimum(min(page_numbers))
+        page_spin.setMaximum(max(page_numbers))
+        page_spin.setValue(page_numbers[0])
+        page_spin.setSingleStep(1)
+        control_layout.addWidget(page_label)
+        control_layout.addWidget(page_spin)
+
+        zoom_label = QLabel("缩放：")
+        zoom_combo = QComboBox()
+        zoom_combo.addItems(["适应宽度", "40%", "50%", "60%", "70%", "80%", "100%", "120%", "150%"])
+        zoom_combo.setCurrentText("适应宽度")
+        control_layout.addWidget(zoom_label)
+        control_layout.addWidget(zoom_combo)
+
+        page_issue_label = QLabel()
+        page_issue_label.setWordWrap(True)
+        control_layout.addWidget(page_issue_label, 1)
+        visual_layout.addLayout(control_layout)
+
+        image_scroll = QScrollArea()
+        image_scroll.setWidgetResizable(True)
+        image_label = QLabel("正在生成标注预览...")
+        image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        image_label.setScaledContents(False)
+        image_scroll.setWidget(image_label)
+        visual_layout.addWidget(image_scroll, 1)
+
+        page_issue_panel = QWidget()
+        page_issue_panel_layout = QVBoxLayout(page_issue_panel)
+        page_issue_panel_layout.setContentsMargins(0, 18, 0, 0)
+        page_issue_panel_layout.setSpacing(4)
+
+        page_issue_title = QLabel("本页问题定位")
+        page_issue_title.setStyleSheet("font-weight: bold;")
+        page_issue_title.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        page_issue_panel_layout.addWidget(page_issue_title)
+
+        page_issue_list = QListWidget()
+        page_issue_list.setMaximumHeight(104)
+        page_issue_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        page_issue_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        page_issue_list.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        page_issue_panel_layout.addWidget(page_issue_list)
+
+        page_issue_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        visual_layout.addWidget(page_issue_panel)
+
+        self.visual_issue_state["image_scroll"] = image_scroll
+        self.visual_issue_state["image_label"] = image_label
+        self.visual_issue_state["page_issue_list"] = page_issue_list
+        self.visual_issue_state["page_spin"] = page_spin
+        self.visual_issue_state["zoom_combo"] = zoom_combo
+        self.visual_issue_state["fit_to_width"] = True
+        viewport = image_scroll.viewport()
+        original_resize_event = viewport.resizeEvent
+
+        def wrapped_resize_event(event):
+            original_resize_event(event)
+            self.refresh_visualization_pixmap()
+
+        viewport.resizeEvent = wrapped_resize_event
+
+        zoom_combo.currentTextChanged.connect(self.handle_visual_zoom_changed)
+
+        visual_widget.setLayout(visual_layout)
+
+        page_spin.valueChanged.connect(
+            lambda value: self.update_issue_visualization_page(
+                value,
+                image_label,
+                page_issue_label,
+            )
+        )
+
+        self.update_issue_visualization_page(page_numbers[0], image_label, page_issue_label)
+        return visual_widget
+
+    @staticmethod
+    def normalize_match_text(text):
+        return re.sub(r"[\s\u3000]+", "", str(text or "")).strip()
+
+    @staticmethod
+    def group_page_lines(page):
+        rows = []
+        spans = sorted(
+            [span for span in getattr(page, "spans", []) if getattr(span, "text", "").strip()],
+            key=lambda item: ((item.bbox[1] + item.bbox[3]) / 2, item.bbox[0]),
+        )
+        for span in spans:
+            bbox = getattr(span, "bbox", None) or []
+            if len(bbox) != 4:
+                continue
+            x0, y0, x1, y1 = [float(value) for value in bbox]
+            center_y = (y0 + y1) / 2
+            target_row = None
+            for row in rows:
+                if abs(center_y - row["center_y"]) <= 4.0:
+                    target_row = row
+                    break
+            if target_row is None:
+                target_row = {"center_y": center_y, "items": []}
+                rows.append(target_row)
+            target_row["items"].append({"text": span.text.strip(), "bbox": [x0, y0, x1, y1]})
+
+        lines = []
+        for row in rows:
+            items = sorted(row["items"], key=lambda item: item["bbox"][0])
+            text = "".join(item["text"] for item in items).strip()
+            if not text:
+                continue
+            bbox = [
+                min(item["bbox"][0] for item in items),
+                min(item["bbox"][1] for item in items),
+                max(item["bbox"][2] for item in items),
+                max(item["bbox"][3] for item in items),
+            ]
+            lines.append({"text": text, "bbox": bbox})
+        return lines
+
+    def top_area_texts(self, page):
+        page_height = float(getattr(page, "height", 0.0) or 0.0)
+        if page_height <= 0:
+            return []
+        texts = []
+        for span in getattr(page, "spans", []):
+            text = getattr(span, "text", "").strip()
+            bbox = getattr(span, "bbox", None) or []
+            if not text or len(bbox) != 4:
+                continue
+            if float(bbox[3]) > page_height * 0.15:
+                continue
+            texts.append(text)
+        return texts
+
+    def looks_like_first_main_page(self, page):
+        raw_text = getattr(page, "text", "") or ""
+        normalized = self.normalize_match_text(raw_text)
+        if "第1章" in normalized or "第一章" in normalized:
+            return True
+        return bool(
+            re.search(
+                r"^\s*(?:1[.、\s]+(?:绪论|緒論)|第\s*1\s*章(?:\s|$)|第一章(?:\s|$)|(?:绪论|緒論)\s*$)",
+                raw_text,
+                flags=re.MULTILINE,
+            )
+        )
+
+    def looks_like_backmatter_start(self, page):
+        top_texts = self.top_area_texts(page)
+        if not top_texts:
+            return False
+        for text in top_texts[:6]:
+            compact = self.normalize_match_text(text)
+            if compact in {"参考文献", "致谢", "致謝"}:
+                return True
+            if re.fullmatch(r"附录[A-ZＡ-Ｚ]?", compact):
+                return True
+        return False
+
+    def build_pdf_page_roles(self, pdf_pages):
+        roles = {}
+        if not pdf_pages:
+            return roles
+
+        for idx, page in enumerate(pdf_pages, start=1):
+            page_no = int(getattr(page, "page_no", idx) or idx)
+            roles[page_no] = "other"
+
+        for idx, page in enumerate(pdf_pages, start=1):
+            page_no = int(getattr(page, "page_no", idx) or idx)
+            if self.is_catalogue_page(page):
+                roles[page_no] = "catalogue"
+
+        first_main_idx = None
+        for idx, page in enumerate(pdf_pages):
+            page_no = int(getattr(page, "page_no", idx + 1) or (idx + 1))
+            if roles.get(page_no) == "catalogue":
+                continue
+            if self.looks_like_first_main_page(page):
+                first_main_idx = idx
+                break
+
+        if first_main_idx is None:
+            return roles
+
+        backmatter_indices = []
+        for idx in range(first_main_idx + 1, len(pdf_pages)):
+            if self.looks_like_backmatter_start(pdf_pages[idx]):
+                backmatter_indices.append(idx)
+        main_end_idx = min(backmatter_indices) if backmatter_indices else len(pdf_pages)
+
+        for idx in range(first_main_idx, main_end_idx):
+            page_no = int(getattr(pdf_pages[idx], "page_no", idx + 1) or (idx + 1))
+            roles[page_no] = "main"
+
+        for idx in range(main_end_idx, len(pdf_pages)):
+            page_no = int(getattr(pdf_pages[idx], "page_no", idx + 1) or (idx + 1))
+            if roles.get(page_no) != "catalogue":
+                roles[page_no] = "backmatter"
+
+        for idx in range(first_main_idx):
+            page = pdf_pages[idx]
+            page_no = int(getattr(page, "page_no", idx + 1) or (idx + 1))
+            if roles.get(page_no) == "catalogue":
+                continue
+            normalized = self.normalize_match_text(getattr(page, "text", ""))
+            if "摘要" in normalized and "ABSTRACT" not in normalized.upper():
+                roles[page_no] = "cn_abstract"
+            elif "ABSTRACT" in getattr(page, "text", "") or "Abstract" in getattr(page, "text", ""):
+                roles[page_no] = "en_abstract"
+
+        return roles
+
+    def allowed_roles_for_issue(self, issue):
+        section_label = self.resolve_issue_section_label(issue)
+        rule_id = str(issue.get("rule_id") or "")
+        title = str(issue.get("title") or "")
+        if section_label in {"中文摘要标题", "中文摘要内容", "中文关键词标题", "中文关键词内容", "摘要与关键词"}:
+            return {"cn_abstract"}
+        if section_label in {"英文摘要标题", "英文摘要内容", "英文关键词标题", "英文关键词内容"}:
+            return {"en_abstract"}
+        if section_label in {"目录", "目录内容", "目录标题"}:
+            return {"catalogue"}
+        if section_label in {"参考文献标题", "参考文献内容", "致谢标题", "致谢内容", "附录"}:
+            return {"backmatter"}
+        if "citation_superscript" in rule_id or title == "引文标识":
+            return {"main"}
+        if section_label in {"页码", "页眉", "页脚"}:
+            return {"cn_abstract", "en_abstract", "main", "backmatter", "catalogue", "other"}
+        return {"main", "backmatter"}
+
+    @staticmethod
+    def merge_bboxes(bboxes):
+        if not bboxes:
+            return None
+        return [
+            min(item[0] for item in bboxes),
+            min(item[1] for item in bboxes),
+            max(item[2] for item in bboxes),
+            max(item[3] for item in bboxes),
+        ]
+
+    def build_line_windows(self, lines, max_window_size=4):
+        windows = []
+        total = len(lines)
+        for start in range(total):
+            for size in range(1, max_window_size + 1):
+                end = start + size
+                if end > total:
+                    break
+                window_lines = lines[start:end]
+                merged_text = "".join(line["text"] for line in window_lines).strip()
+                if not merged_text:
+                    continue
+                merged_bbox = self.merge_bboxes([line["bbox"] for line in window_lines])
+                if merged_bbox is None:
+                    continue
+                windows.append(
+                    {
+                        "text": merged_text,
+                        "bbox": merged_bbox,
+                        "line_count": size,
+                    }
+                )
+        return windows
+
+    def build_issue_search_candidates(self, issue):
+        candidates = []
+        metadata = issue.get("metadata") or {}
+        for value in (
+            metadata.get("original_content"),
+            metadata.get("content"),
+            (metadata.get("detail") or {}).get("段落") if isinstance(metadata.get("detail"), dict) else None,
+            (metadata.get("detail") or {}).get("内容") if isinstance(metadata.get("detail"), dict) else None,
+        ):
+            normalized = self.normalize_match_text(value)
+            if normalized and len(normalized) >= 4:
+                candidates.append(normalized)
+                if len(normalized) > 40:
+                    candidates.append(normalized[:80])
+                    candidates.append(normalized[-80:])
+
+        message = self.normalize_match_text(issue.get("message"))
+        if message:
+            if len(message) >= 12:
+                candidates.append(message[:120])
+                if len(message) > 120:
+                    candidates.append(message[-120:])
+            candidates.extend(
+                snippet
+                for snippet in re.split(r"[，。；：,.!?（）()\[\]\-]", message)
+                if len(snippet) >= 6 and not snippet.isdigit()
+            )
+        # 去重并优先短一些、可检索的片段
+        unique = []
+        seen = set()
+        for item in candidates:
+            clipped = item[:120]
+            if clipped not in seen and not clipped.isdigit():
+                seen.add(clipped)
+                unique.append(clipped)
+        return unique[:10]
+
+    def is_catalogue_page(self, page):
+        normalized = self.normalize_match_text(getattr(page, "text", ""))
+        if "目录" in normalized or "目錄" in normalized:
+            return True
+        raw_text = getattr(page, "text", "") or ""
+        dotted_entries = len(re.findall(r"[.．·•…\-_ ]{2,}\s*[IVXLCDMivxlcdm\d]+\s*$", raw_text, flags=re.MULTILINE))
+        numbered_entries = len(re.findall(r"^\s*(?:第\s*\d+\s*章|\d+\.\d+(?:\.\d+)?)", raw_text, flags=re.MULTILINE))
+        return dotted_entries >= 5 and numbered_entries >= 3
+
+    def should_avoid_catalogue_for_issue(self, issue):
+        section_label = self.resolve_issue_section_label(issue)
+        rule_id = str(issue.get("rule_id") or "")
+        title = str(issue.get("title") or "")
+        if section_label in {"目录", "目录内容"}:
+            return False
+        if "catalogue" in rule_id or "toc." in rule_id or title == "目录":
+            return False
+        return True
+
+    def locate_docx_marker_bbox(self, issue, pdf_pages):
+        metadata = issue.get("metadata") or {}
+        marker = str(metadata.get("marker") or "").strip()
+        if not marker:
+            return None
+
+        page_roles = self.build_pdf_page_roles(pdf_pages)
+        allowed_roles = self.allowed_roles_for_issue(issue)
+        best_match = None
+        normalized_marker = self.normalize_match_text(marker)
+        for page in pdf_pages:
+            page_no = int(getattr(page, "page_no", 0) or 0)
+            if page_roles.get(page_no, "other") not in allowed_roles:
+                continue
+            for line in self.group_page_lines(page):
+                line_text = self.normalize_match_text(line["text"])
+                if normalized_marker not in line_text:
+                    continue
+                start_pos = line_text.find(normalized_marker)
+                score = (len(normalized_marker) * 20) - (start_pos * 5)
+                if best_match is None or score > best_match["score"]:
+                    best_match = {
+                        "page": page_no,
+                        "bbox": [float(value) for value in line["bbox"]],
+                        "score": score,
+                    }
+        return best_match
+
+    def locate_reference_entry_boxes(self, issue, pdf_pages):
+        section_label = self.resolve_issue_section_label(issue)
+        if section_label != "参考文献内容":
+            return []
+
+        metadata = issue.get("metadata") or {}
+        raw_content = str(metadata.get("original_content") or metadata.get("content") or "").strip()
+        if not raw_content or "[" not in raw_content:
+            return []
+
+        entries = [part.strip() for part in raw_content.split("|") if part.strip()]
+        if not entries:
+            return []
+
+        page_roles = self.build_pdf_page_roles(pdf_pages)
+        locations = []
+        for entry in entries:
+            marker_match = re.match(r"^\s*(\[\d+\])", entry)
+            marker = marker_match.group(1) if marker_match else None
+            normalized_entry = self.normalize_match_text(entry)
+            best_match = None
+            for page in pdf_pages:
+                page_no = int(getattr(page, "page_no", 0) or 0)
+                if page_roles.get(page_no) != "backmatter":
+                    continue
+                lines = self.group_page_lines(page)
+                for window in self.build_line_windows(lines, max_window_size=6):
+                    line_text = self.normalize_match_text(window["text"])
+                    if len(line_text) < 4:
+                        continue
+                    score = None
+                    if marker:
+                        marker_pos = line_text.find(self.normalize_match_text(marker))
+                        if marker_pos < 0:
+                            continue
+                        score = 1000 - (marker_pos * 10)
+                        if normalized_entry and normalized_entry in line_text:
+                            score += min(800, len(normalized_entry))
+                        if line_text.startswith(self.normalize_match_text(marker)):
+                            score += 300
+                    elif normalized_entry and normalized_entry in line_text:
+                        start_pos = line_text.find(normalized_entry)
+                        score = (len(normalized_entry) * 10) - (start_pos * 3)
+
+                    if score is None:
+                        continue
+
+                    if best_match is None or score > best_match["score"]:
+                        best_match = {
+                            "page": page_no,
+                            "bbox": [float(value) for value in window["bbox"]],
+                            "score": score,
+                        }
+            if best_match is not None:
+                locations.append(best_match)
+        return locations
+
+    def locate_docx_issue_bbox(self, issue, pdf_pages):
+        marker_located = self.locate_docx_marker_bbox(issue, pdf_pages)
+        if marker_located is not None:
+            return marker_located
+
+        candidates = self.build_issue_search_candidates(issue)
+        if not candidates:
+            return None
+
+        section_label = self.resolve_issue_section_label(issue)
+        allow_header_footer = section_label in {"页码", "页眉", "页脚"}
+        avoid_catalogue = self.should_avoid_catalogue_for_issue(issue)
+        page_roles = self.build_pdf_page_roles(pdf_pages)
+        allowed_roles = self.allowed_roles_for_issue(issue)
+        best_match = None
+        for page in pdf_pages:
+            page_no = int(getattr(page, "page_no", 0) or 0)
+            page_role = page_roles.get(page_no, "other")
+            if page_role not in allowed_roles:
+                continue
+            if avoid_catalogue and self.is_catalogue_page(page):
+                continue
+            lines = self.group_page_lines(page)
+            for line in self.build_line_windows(lines):
+                line_text = self.normalize_match_text(line["text"])
+                if len(line_text) < 4:
+                    continue
+                if not allow_header_footer:
+                    bbox = line["bbox"]
+                    page_height = float(getattr(page, "height", 0.0) or 0.0)
+                    if page_height > 0:
+                        center_y = (bbox[1] + bbox[3]) / 2
+                        if center_y <= page_height * 0.10 or center_y >= page_height * 0.88:
+                            continue
+                for candidate in candidates:
+                    if len(candidate) < 4 or len(line_text) < 4:
+                        continue
+                    start_pos = line_text.find(candidate)
+                    if start_pos >= 0:
+                        extra_chars = max(0, len(line_text) - len(candidate))
+                        score = (
+                            (len(candidate) * 10)
+                            - (extra_chars * 2)
+                            - ((line.get("line_count", 1) - 1) * 6)
+                            - (start_pos * 3)
+                        )
+                        if best_match is None or score > best_match["score"]:
+                            best_match = {
+                                "page": page_no,
+                                "bbox": [float(value) for value in line["bbox"]],
+                                "score": score,
+                            }
+        return best_match
+
+    def collect_visual_issues(self, issues, pdf_pages):
+        """筛选并补齐可用于页面标注的问题。"""
+        visual_issues = []
+        for issue in issues:
+            source = issue.get("source")
+            page = issue.get("page")
+            bbox = issue.get("bbox")
+            if isinstance(page, int) and page > 0 and isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                try:
+                    x1, y1, x2, y2 = [float(value) for value in bbox]
+                except Exception:
+                    x1 = y1 = x2 = y2 = 0.0
+                if x2 > x1 and y2 > y1:
+                    visual_issue = dict(issue)
+                    visual_issue["bbox"] = [x1, y1, x2, y2]
+                    visual_issue["visual_source"] = source
+                    visual_issues.append(visual_issue)
+                    continue
+
+            if source != "docx":
+                continue
+
+            reference_locations = self.locate_reference_entry_boxes(issue, pdf_pages)
+            if reference_locations:
+                for idx, located in enumerate(reference_locations, start=1):
+                    visual_issue = dict(issue)
+                    visual_issue["page"] = located["page"]
+                    visual_issue["bbox"] = located["bbox"]
+                    visual_issue["visual_source"] = "docx_reference_located"
+                    visual_issue["visual_instance"] = idx
+                    visual_issues.append(visual_issue)
+                continue
+
+            located = self.locate_docx_issue_bbox(issue, pdf_pages)
+            if not located:
+                continue
+
+            visual_issue = dict(issue)
+            visual_issue["page"] = located["page"]
+            visual_issue["bbox"] = located["bbox"]
+            visual_issue["visual_source"] = "docx_located"
+            visual_issues.append(visual_issue)
+        return visual_issues
+
+    def update_issue_visualization_page(self, page_no, image_label, page_issue_label):
+        """更新当前页的标注图片。"""
+        state = self.visual_issue_state or {}
+        pdf_path = state.get("pdf_path")
+        visual_issues = state.get("issues") or []
+        page_issues = [issue for issue in visual_issues if issue.get("page") == page_no]
+        error_count = sum(1 for issue in page_issues if str(issue.get("severity")).lower() == "error")
+        warning_count = sum(1 for issue in page_issues if str(issue.get("severity")).lower() == "warning")
+        info_count = sum(1 for issue in page_issues if str(issue.get("severity")).lower() == "info")
+        page_issue_label.setText(
+            f"当前页可标注问题数：{len(page_issues)}（错误：{error_count}，警告：{warning_count}，提示：{info_count}）"
+        )
+
+        if not pdf_path:
+            image_label.setText("未找到可用于标注的 PDF。")
+            image_label.setPixmap(QPixmap())
+            return
+
+        try:
+            pixmap = self.render_pdf_page_with_issue_boxes(
+                pdf_path,
+                page_no,
+                page_issues,
+                zoom=float(state.get("zoom") or 1.6),
+            )
+        except Exception as exc:
+            image_label.setText(f"标注预览生成失败：{exc}")
+            image_label.setPixmap(QPixmap())
+            return
+
+        state["current_pixmap"] = pixmap
+        self.refresh_visualization_pixmap()
+        self.populate_current_page_issue_buttons(page_issues)
+
+    def render_pdf_page_with_issue_boxes(self, pdf_path, page_no, page_issues, zoom=1.6):
+        """将 PDF 页渲染为图片并叠加问题框。"""
+        try:
+            import fitz  # type: ignore
+        except Exception as exc:
+            raise RuntimeError("PyMuPDF 未安装，无法生成页面标注预览。") from exc
+
+        with fitz.open(pdf_path) as doc:
+            if page_no < 1 or page_no > len(doc):
+                raise ValueError(f"页码超出范围：{page_no}")
+
+            page = doc.load_page(page_no - 1)
+            matrix = fitz.Matrix(zoom, zoom)
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+
+        image_format = QImage.Format.Format_RGB888
+        qimage = QImage(pix.samples, pix.width, pix.height, pix.stride, image_format).copy()
+        pixmap = QPixmap.fromImage(qimage)
+
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        font = QFont()
+        font.setPointSize(10)
+        painter.setFont(font)
+
+        for issue in page_issues:
+            color = self.get_issue_draw_color(issue.get("severity"))
+            pen = QPen(color)
+            pen.setWidth(3 if str(issue.get("severity")).lower() == "error" else 2)
+            painter.setPen(pen)
+
+            x1, y1, x2, y2 = issue["bbox"]
+            sx1 = int(round(x1 * zoom))
+            sy1 = int(round(y1 * zoom))
+            sx2 = int(round(x2 * zoom))
+            sy2 = int(round(y2 * zoom))
+            painter.drawRect(sx1, sy1, max(1, sx2 - sx1), max(1, sy2 - sy1))
+
+            label = f"{issue.get('display_index', '')}. {self.resolve_issue_section_label(issue)}"
+            text_y = max(18, sy1 - 6)
+            painter.fillRect(
+                sx1,
+                text_y - 16,
+                min(320, max(80, len(label) * 12)),
+                18,
+                QColor(255, 255, 255, 110),
+            )
+            painter.drawText(sx1 + 4, text_y - 2, label)
+
+        painter.end()
+        return pixmap
+
+    def refresh_visualization_pixmap(self):
+        """按可视化区域宽度自适应显示标注图片，保持长宽比不变。"""
+        state = self.visual_issue_state or {}
+        pixmap = state.get("current_pixmap")
+        image_label = state.get("image_label")
+        image_scroll = state.get("image_scroll")
+        if not isinstance(pixmap, QPixmap) or image_label is None or image_scroll is None:
+            return
+
+        if state.get("fit_to_width", True):
+            viewport_width = max(200, image_scroll.viewport().width() - 12)
+            scaled = pixmap.scaledToWidth(viewport_width, Qt.TransformationMode.SmoothTransformation)
+        else:
+            zoom_factor = float(state.get("display_zoom_factor") or 1.0)
+            target_width = max(1, int(round(pixmap.width() * zoom_factor)))
+            scaled = pixmap.scaledToWidth(target_width, Qt.TransformationMode.SmoothTransformation)
+        image_label.setPixmap(scaled)
+        image_label.resize(scaled.size())
+
+    def handle_visual_zoom_changed(self, value):
+        state = self.visual_issue_state or {}
+        text = str(value or "").strip()
+        if text == "适应宽度":
+            state["fit_to_width"] = True
+            state["display_zoom_factor"] = 1.0
+        else:
+            state["fit_to_width"] = False
+            try:
+                state["display_zoom_factor"] = max(0.1, float(text.rstrip("%")) / 100.0)
+            except Exception:
+                state["display_zoom_factor"] = 1.0
+        self.refresh_visualization_pixmap()
+
+    def populate_current_page_issue_buttons(self, page_issues):
+        state = self.visual_issue_state or {}
+        page_issue_list = state.get("page_issue_list")
+        if page_issue_list is None:
+            return
+
+        page_issue_list.clear()
+
+        if not page_issues:
+            item = QListWidgetItem("当前页没有可标注问题。")
+            page_issue_list.addItem(item)
+            return
+
+        for issue in page_issues:
+            index = issue.get("display_index", "")
+            section = self.resolve_issue_section_label(issue)
+            item = QListWidgetItem(f"{index}. {section}")
+            item.setData(Qt.ItemDataRole.UserRole, index)
+            page_issue_list.addItem(item)
+
+        try:
+            page_issue_list.itemClicked.disconnect()
+        except Exception:
+            pass
+        page_issue_list.itemClicked.connect(self.handle_page_issue_item_clicked)
+
+    def handle_page_issue_item_clicked(self, item):
+        issue_index = item.data(Qt.ItemDataRole.UserRole)
+        if issue_index is None:
+            return
+        self.scroll_to_issue(issue_index)
+
+    def navigate_to_issue(self, issue):
+        state = self.visual_issue_state or {}
+        page_spin = state.get("page_spin")
+        target_page = None
+        for visual_issue in state.get("issues") or []:
+            if visual_issue.get("display_index") == issue.get("display_index"):
+                mapped_page = visual_issue.get("page")
+                if isinstance(mapped_page, int) and mapped_page > 0:
+                    target_page = mapped_page
+                    break
+
+        if not (isinstance(target_page, int) and target_page > 0):
+            raw_page = issue.get("page")
+            if isinstance(raw_page, int) and raw_page > 0:
+                target_page = raw_page
+
+        if isinstance(target_page, int) and target_page > 0 and page_spin is not None:
+            page_spin.setValue(target_page)
+
+    def scroll_to_issue(self, issue_index):
+        target_widget = self.issue_widget_map.get(issue_index)
+        if target_widget is None:
+            return
+        self.result_scroll.ensureWidgetVisible(target_widget, 20, 20)
+
+    @staticmethod
+    def get_issue_draw_color(severity):
+        severity = str(severity or "info").strip().lower()
+        if severity == "error":
+            return QColor(220, 53, 69)
+        if severity == "warning":
+            return QColor(255, 193, 7)
+        return QColor(13, 110, 253)
 
     def get_section_name(self, section_key):
         """根据section键获取中文名称"""

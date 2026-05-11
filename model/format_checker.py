@@ -4,6 +4,8 @@ import re # 导入正则表达式模块
 from docx.enum.text import WD_LINE_SPACING
 from docx.oxml.ns import qn
 
+_XML_NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+
 class FormatChecker:
     def __init__(self):
         """初始化格式检查器"""
@@ -222,6 +224,7 @@ class FormatChecker:
             "Arial": {"Arial"},
         }
         self.font_alias_lookup = self._build_font_alias_lookup()
+        self._doc_default_font_cache = {}
 
     def _get_font_size_pt(self, size_option: str) -> float | None:
         """从字号选项中提取Pt值"""
@@ -574,8 +577,30 @@ class FormatChecker:
         actual_canonical = self.font_alias_lookup.get(actual_norm, actual_norm)
         return expected_canonical == actual_canonical
 
-    def _get_run_font_candidates(self, run) -> list[str]:
+    def _run_text_script_flags(self, run) -> tuple[bool, bool]:
+        text = str(getattr(run, "text", "") or "")
+        has_cjk = bool(re.search(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", text))
+        has_latin = bool(re.search(r"[A-Za-z]", text))
+        return has_cjk, has_latin
+
+    def _is_cjk_expected_font(self, expected_font: str | None) -> bool:
+        expected_norm = self._normalize_font_name(expected_font)
+        if not expected_norm:
+            return False
+        cjk_fonts = {
+            self._normalize_font_name(name)
+            for name in ("宋体", "黑体", "楷体", "仿宋", "华文中宋", "微软雅黑", "等线")
+        }
+        canonical = self.font_alias_lookup.get(expected_norm, expected_norm)
+        return canonical in cjk_fonts
+
+    def _should_skip_run_font_check(self, run, expected_font: str | None) -> bool:
+        has_cjk, has_latin = self._run_text_script_flags(run)
+        return self._is_cjk_expected_font(expected_font) and has_latin and not has_cjk
+
+    def _get_run_explicit_font_candidates(self, run) -> list[str]:
         fonts: list[str] = []
+        has_cjk, has_latin = self._run_text_script_flags(run)
 
         # 常规路径
         run_font = run.font.name if getattr(run, "font", None) else None
@@ -589,6 +614,10 @@ class FormatChecker:
                 rfonts = rpr.rFonts
                 if rfonts is not None:
                     for key in ("eastAsia", "ascii", "hAnsi", "cs"):
+                        if key == "eastAsia" and has_latin and not has_cjk:
+                            continue
+                        if key in {"ascii", "hAnsi", "cs"} and has_cjk and not has_latin:
+                            continue
                         value = rfonts.get(qn(f"w:{key}"))
                         if value:
                             fonts.append(str(value))
@@ -596,6 +625,65 @@ class FormatChecker:
             pass
 
         return [f for f in fonts if f]
+
+    def _get_run_font_candidates(self, run) -> list[str]:
+        fonts = self._get_run_explicit_font_candidates(run)
+
+        # 文档默认字体（docDefaults）作为兜底，避免英文标题等依赖默认西文字体时误报
+        try:
+            for value in self._get_doc_default_font_candidates(run):
+                fonts.append(str(value))
+        except Exception:
+            pass
+
+        return [f for f in fonts if f]
+
+    def _filter_font_slots_for_container(self, font_slots: dict[str, list[str]], container) -> list[str]:
+        has_cjk, has_latin = self._run_text_script_flags(container)
+        fonts: list[str] = []
+        for key in ("ascii", "hAnsi", "cs", "eastAsia"):
+            if key == "eastAsia" and has_latin and not has_cjk:
+                continue
+            if key in {"ascii", "hAnsi", "cs"} and has_cjk and not has_latin:
+                continue
+            fonts.extend(str(value) for value in font_slots.get(key, []) if value)
+        return fonts
+
+    def _get_doc_default_font_candidates(self, container) -> list[str]:
+        part = getattr(container, "part", None)
+        if part is None:
+            return []
+
+        cache_key = id(part)
+        if cache_key in self._doc_default_font_cache:
+            font_slots = self._doc_default_font_cache[cache_key]
+            return self._filter_font_slots_for_container(font_slots, container)
+
+        font_slots: dict[str, list[str]] = {
+            "ascii": [],
+            "hAnsi": [],
+            "cs": [],
+            "eastAsia": [],
+        }
+        try:
+            styles_part = getattr(part, "_styles_part", None)
+            styles_element = getattr(styles_part, "element", None) if styles_part is not None else None
+            if styles_element is not None:
+                for key in ("ascii", "hAnsi", "cs", "eastAsia"):
+                    try:
+                        values = styles_element.xpath(
+                            f"./w:docDefaults/w:rPrDefault/w:rPr/w:rFonts/@w:{key}"
+                        )
+                    except Exception:
+                        values = []
+                    for value in values:
+                        if value:
+                            font_slots[key].append(str(value))
+        except Exception:
+            pass
+
+        self._doc_default_font_cache[cache_key] = font_slots
+        return self._filter_font_slots_for_container(font_slots, container)
 
     def _get_paragraph_style_font_candidates(self, paragraph) -> list[str]:
         fonts: list[str] = []
@@ -633,22 +721,32 @@ class FormatChecker:
             return True
 
         found_explicit_font = False
+        style_fonts = self._get_paragraph_style_font_candidates(paragraph)
         for run in paragraph.runs:
             if run.text.strip() == "":
                 continue
+            if self._should_skip_run_font_check(run, expected_font):
+                continue
 
-            candidate_fonts = self._get_run_font_candidates(run)
+            explicit_candidate_fonts = self._get_run_explicit_font_candidates(run)
+            if explicit_candidate_fonts:
+                found_explicit_font = True
+                if not any(self._is_font_equivalent(expected_font, x) for x in explicit_candidate_fonts):
+                    return False
+                continue
+
+            candidate_fonts = self._get_doc_default_font_candidates(run)
+            if style_fonts:
+                candidate_fonts.extend(style_fonts)
+            candidate_fonts = [f for f in candidate_fonts if f]
             if not candidate_fonts:
                 continue
-            found_explicit_font = True
-
             if not any(self._is_font_equivalent(expected_font, x) for x in candidate_fonts):
                 return False
 
         if found_explicit_font:
             return True
 
-        style_fonts = self._get_paragraph_style_font_candidates(paragraph)
         if style_fonts:
             return any(self._is_font_equivalent(expected_font, x) for x in style_fonts)
 

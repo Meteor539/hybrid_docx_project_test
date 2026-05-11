@@ -108,6 +108,16 @@ def _has_right_tab_stop(paragraph) -> bool:
     return any(str(value).strip().lower() == "right" for value in tab_values)
 
 
+def _formula_number_has_leader(raw_gap_text: str) -> bool:
+    if not raw_gap_text:
+        return False
+    candidate = str(raw_gap_text or "").replace("\t", "")
+    candidate = re.sub(r"\s+$", "", candidate)
+    if not candidate:
+        return False
+    return bool(re.search(r"[.．·•…\-—_－]{3,}$", candidate))
+
+
 def _run_spacing_value(run) -> int | None:
     element = getattr(run, "_element", None)
     if element is None:
@@ -838,6 +848,8 @@ def _check_runs_font(checker: FormatChecker, runs, expected_font: str | None) ->
         return True
     for run in runs:
         if not str(getattr(run, "text", "") or "").strip():
+            continue
+        if checker._should_skip_run_font_check(run, expected_font):
             continue
         candidate_fonts = checker._get_run_font_candidates(run)
         if not candidate_fonts:
@@ -2645,21 +2657,26 @@ class FormulaNumberRightAlignedRule(BaseRule):
             if not match:
                 continue
 
-            if _has_right_tab_stop(paragraph) or "\t" in raw_text:
-                continue
-
             math_jc = _math_paragraph_justification(paragraph)
             gap_text = raw_text[: match.start()]
             trailing_gap = re.search(r"(\s+)$", gap_text)
             gap_len = len(trailing_gap.group(1)) if trailing_gap else 0
 
             problems: list[str] = []
-            if gap_len >= 1:
+            if _formula_number_has_leader(gap_text):
+                problems.append("公式与编号之间疑似存在虚线或引导符")
+
+            if _has_right_tab_stop(paragraph) or "\t" in raw_text:
+                if not problems:
+                    continue
+            elif gap_len >= 1:
                 problems.append("公式编号前疑似仅用空格与公式分隔")
+
             if math_jc == "left":
                 problems.append("公式对象内部对齐方式疑似为左对齐")
-            elif math_jc is None and gap_len < 1:
+            elif math_jc is None and gap_len < 1 and not _formula_number_has_leader(gap_text):
                 problems.append("未识别到将公式编号稳定定位到右侧行末的结构")
+
 
             if not problems:
                 continue

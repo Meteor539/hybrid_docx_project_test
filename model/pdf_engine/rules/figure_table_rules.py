@@ -61,16 +61,16 @@ def _is_split_pair(caption_box, region_box, *, caption_expected: str, page_heigh
         return False
 
     overlap = _horizontal_overlap_ratio(caption_box, region_box)
-    if overlap < 0.3:
+    if overlap < 0.2:
         return False
 
     if caption_expected == "below":
-        caption_near_top = caption_box[1] <= page_height * 0.2
-        region_near_bottom = region_box[3] >= page_height * 0.8
+        caption_near_top = caption_box[1] <= page_height * 0.35
+        region_near_bottom = region_box[3] >= page_height * 0.7
         return caption_near_top and region_near_bottom
 
-    caption_near_bottom = caption_box[3] >= page_height * 0.8
-    region_near_top = region_box[1] <= page_height * 0.2
+    caption_near_bottom = caption_box[3] >= page_height * 0.7
+    region_near_top = region_box[1] <= page_height * 0.3
     return caption_near_bottom and region_near_top
 
 
@@ -81,6 +81,48 @@ def _find_nearby_region(page, caption_box, *, kind: str, caption_expected: str):
         if overlap >= 0.3 and 0 <= gap <= 80:
             return region_box
     return None
+
+
+def _find_continuation_region(next_page, current_region_box, *, kind: str):
+    page_height = float(getattr(next_page, "height", 0.0) or 0.0)
+    if page_height <= 0:
+        return None
+
+    best_region = None
+    best_score = -1.0
+    current_width = max(1.0, current_region_box[2] - current_region_box[0])
+    for region_box in _regions(next_page, kind=kind):
+        if region_box[1] > page_height * 0.35:
+            continue
+        overlap = _horizontal_overlap_ratio(current_region_box, region_box)
+        if overlap < 0.2:
+            continue
+        next_width = max(1.0, region_box[2] - region_box[0])
+        width_ratio = min(current_width, next_width) / max(current_width, next_width)
+        score = overlap * 0.7 + width_ratio * 0.3
+        if score > best_score:
+            best_score = score
+            best_region = region_box
+    return best_region
+
+
+def _has_caption_before_region(page, region_box, *, kind: str):
+    prefix = "图" if kind == "figure" else "表"
+    pattern = re.compile(rf"^{prefix}\s*[A-Z]?\d+(?:[\.．\-－]\d+)*(?:\s+.+)?$")
+    for span in getattr(page, "spans", []):
+        text = (getattr(span, "text", "") or "").strip()
+        bbox = getattr(span, "bbox", None) or []
+        if len(bbox) != 4 or not text or not pattern.match(text):
+            continue
+        span_box = [float(x) for x in bbox]
+        if span_box[3] > region_box[1]:
+            continue
+        if region_box[1] - span_box[3] > 120:
+            continue
+        if _horizontal_overlap_ratio(span_box, region_box) < 0.2:
+            continue
+        return True
+    return False
 
 
 def _find_split_region(pages, index: int, caption_box, *, kind: str, caption_expected: str):
@@ -300,14 +342,45 @@ class TableCaptionAbovePdfRule(BaseRule):
             return []
 
         issues: list[Issue] = []
+        seen_keys: set[tuple[str, int, str, str]] = set()
         for page_index, page in enumerate(pages):
+            page_no = getattr(page, "page_no", None)
             table_boxes = list(_regions(page, kind="table"))
             if not table_boxes:
                 continue
 
             for caption in _caption_candidates(page, kind="table"):
                 caption_box = caption["bbox"]
-                if _find_nearby_region(page, caption_box, kind="table", caption_expected="above") is not None:
+                nearby_region = _find_nearby_region(page, caption_box, kind="table", caption_expected="above")
+                if nearby_region is not None:
+                    if page_index + 1 < len(pages):
+                        next_page = pages[page_index + 1]
+                        page_height = float(getattr(page, "height", 0.0) or 0.0)
+                        if page_height > 0 and nearby_region[3] >= page_height * 0.7:
+                            continuation_region = _find_continuation_region(next_page, nearby_region, kind="table")
+                            if continuation_region is not None and not _has_caption_before_region(next_page, continuation_region, kind="table"):
+                                key = ("table", page_no or -1, caption["text"], "body")
+                                if key not in seen_keys:
+                                    seen_keys.add(key)
+                                    split_page_no = getattr(next_page, "page_no", None)
+                                    issues.append(
+                                        Issue(
+                                            rule_id=self.rule_id,
+                                            title="表题",
+                                            message=f"第{page_no}页表题“{caption['text']}”对应表格主体疑似延续到第{split_page_no}页。",
+                                            severity=Severity.WARNING,
+                                            source=Source.PDF,
+                                            page=page_no,
+                                            bbox=[int(x) for x in caption_box],
+                                            fixable=False,
+                                            metadata={
+                                                "section": "表题",
+                                                "content": caption["text"],
+                                                "problem": "表格主体疑似被拆开排版为两页",
+                                                "related_page": split_page_no,
+                                            },
+                                        )
+                                    )
                     continue
 
                 split_page, _ = _find_split_region(

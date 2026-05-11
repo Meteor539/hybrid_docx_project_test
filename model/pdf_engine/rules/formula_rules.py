@@ -44,6 +44,13 @@ def _is_formula_like_line(text: str) -> bool:
     return ascii_math >= 5 and ascii_math > cjk_chars
 
 
+def _is_formula_number_leader_text(text: str) -> bool:
+    normalized = re.sub(r"[\s\u3000]+", "", text or "")
+    if not normalized:
+        return False
+    return bool(re.fullmatch(r"[.．·•…\-—_－]{3,}", normalized))
+
+
 class FormulaNumberRightAlignedPdfRule(BaseRule):
     rule_id = "formula.number_right_aligned"
     display_name = "Formula number right-end alignment check (pdf)"
@@ -61,7 +68,7 @@ class FormulaNumberRightAlignedPdfRule(BaseRule):
             if page_width <= 0:
                 continue
 
-            for candidate in _formula_number_candidates(page):
+            for candidate_index, candidate in enumerate(_formula_number_candidates(page), start=1):
                 line_spans = _same_line_spans(page, candidate["bbox"])
                 left_spans = [item for item in line_spans if item["bbox"][2] <= candidate["bbox"][0] + 1]
                 if not left_spans:
@@ -71,11 +78,34 @@ class FormulaNumberRightAlignedPdfRule(BaseRule):
                 if not _is_formula_like_line(line_text):
                     continue
 
+                leader_spans = [item for item in left_spans if _is_formula_number_leader_text(item["text"])]
+                if leader_spans:
+                    leader = leader_spans[-1]
+                    issues.append(
+                        Issue(
+                            rule_id=f"{self.rule_id}.leader.{getattr(page, 'page_no', 0)}.{candidate_index}",
+                            title="公式编号",
+                            message=f"第{getattr(page, 'page_no', '?')}页公式编号“{candidate['text']}”前疑似存在引导符“{leader['text']}”。",
+                            severity=Severity.WARNING,
+                            source=Source.PDF,
+                            page=getattr(page, "page_no", None),
+                            bbox=[int(x) for x in candidate["bbox"]],
+                            fixable=False,
+                            metadata={
+                                "section": "公式编号",
+                                "content": candidate["text"],
+                                "problem": "公式与编号之间疑似存在虚线或引导符",
+                                "leader_text": leader["text"],
+                            },
+                        )
+                    )
+                    continue
+
                 # 右侧行末：编号右边界应接近页面右侧区域，且应为本行最右文本。
                 if any(item["bbox"][0] > candidate["bbox"][2] + 2 for item in line_spans):
                     issues.append(
                         Issue(
-                            rule_id=self.rule_id,
+                            rule_id=f"{self.rule_id}.trailing.{getattr(page, 'page_no', 0)}.{candidate_index}",
                             title="公式编号",
                             message=f"第{getattr(page, 'page_no', '?')}页公式编号“{candidate['text']}”右侧仍存在文本，可能未位于行末。",
                             severity=Severity.WARNING,
@@ -97,7 +127,7 @@ class FormulaNumberRightAlignedPdfRule(BaseRule):
 
                 issues.append(
                     Issue(
-                        rule_id=self.rule_id,
+                        rule_id=f"{self.rule_id}.position.{getattr(page, 'page_no', 0)}.{candidate_index}",
                         title="公式编号",
                         message=f"第{getattr(page, 'page_no', '?')}页公式编号“{candidate['text']}”可能未位于右侧行末。",
                         severity=Severity.WARNING,

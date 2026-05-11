@@ -13,8 +13,10 @@ def _is_catalogue_page(page) -> bool:
     normalized = _normalize_text(getattr(page, "text", ""))
     if "目录" in normalized or "目錄" in normalized:
         return True
-    dotted_entries = len(re.findall(r"\d+\.\d+|\d+$", getattr(page, "text", ""), flags=re.MULTILINE))
-    return dotted_entries >= 8 and "第1章" in normalized
+    raw_text = getattr(page, "text", "") or ""
+    dotted_entries = len(re.findall(r"[.．·•…\-_ ]{2,}\s*[IVXLCDMivxlcdm\d]+\s*$", raw_text, flags=re.MULTILINE))
+    numbered_entries = len(re.findall(r"^\s*(?:第\s*\d+\s*章|\d+\.\d+(?:\.\d+)?)", raw_text, flags=re.MULTILINE))
+    return dotted_entries >= 5 and numbered_entries >= 3
 
 
 def _iter_text_lines(page):
