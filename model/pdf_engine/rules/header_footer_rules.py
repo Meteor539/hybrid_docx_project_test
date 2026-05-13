@@ -39,7 +39,7 @@ def _page_number_candidates(page):
             continue
 
         x0, y0, x1, y1 = [float(x) for x in bbox]
-        if page_height > 0 and y1 < page_height * 0.78:
+        if page_height > 0 and y0 < page_height * 0.88:
             continue
 
         center_x = (x0 + x1) / 2
@@ -49,6 +49,7 @@ def _page_number_candidates(page):
                 "bbox": [x0, y0, x1, y1],
                 "kind": "arabic" if normalized.isdigit() else "roman",
                 "center_offset_ratio": abs(center_x - (page_width / 2)) / page_width if page_width > 0 else 1.0,
+                "bottom_offset_ratio": (page_height - y1) / page_height if page_height > 0 else 1.0,
             }
         )
     return candidates
@@ -58,7 +59,18 @@ def _best_page_number_candidate(page):
     candidates = _page_number_candidates(page)
     if not candidates:
         return None
-    return min(candidates, key=lambda item: (item["center_offset_ratio"], -item["bbox"][3]))
+    return min(candidates, key=lambda item: (item["bottom_offset_ratio"], item["center_offset_ratio"]))
+
+
+def _best_unexpected_section_page_number_candidate(page):
+    candidates = [
+        item
+        for item in _page_number_candidates(page)
+        if item["center_offset_ratio"] <= 0.18
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: (item["bottom_offset_ratio"], item["center_offset_ratio"]))
 
 
 def _roman_to_int(text: str) -> int | None:
@@ -350,7 +362,7 @@ class PageNumberStyleSequencePdfRule(BaseRule):
             if role == PAGE_ROLE_CATALOGUE and not is_catalogue_page(page):
                 continue
 
-            best = _best_page_number_candidate(page)
+            best = _best_unexpected_section_page_number_candidate(page)
             if best is None:
                 continue
 

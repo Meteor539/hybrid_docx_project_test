@@ -194,6 +194,8 @@ class MainWindow(QMainWindow):
         
         self.create_headings_tab() # 创建标题选项卡
 
+        self.create_page_elements_tab() # 创建页码页眉页脚选项卡
+
         self.create_figures_or_tables_title_tab() # 创建图|表题选页卡
 
         self.create_references_tab() # 创建参考文献选项卡
@@ -573,6 +575,21 @@ class MainWindow(QMainWindow):
         tab_layout.addWidget(sub_tab_widget)
         self.tab_widget.addTab(tab, section)
 
+    def create_page_elements_tab(self, section="页码页眉页脚"):
+        self.format_combos[section] = {}
+
+        tab = QWidget()
+        tab_layout = QFormLayout(tab)
+        sub_tab_widget = QTabWidget()
+        sub_tab_widget.setTabPosition(QTabWidget.TabPosition.North)
+
+        sub_tab_widget.addTab(self.create_sub_tab(section, "page_number"), "页码")
+        sub_tab_widget.addTab(self.create_sub_tab(section, "header"), "页眉")
+        sub_tab_widget.addTab(self.create_sub_tab(section, "footer"), "页脚")
+
+        tab_layout.addWidget(sub_tab_widget)
+        self.tab_widget.addTab(tab, section)
+
     def create_acknowledgments_tab(self, section = "致谢"):
         self.format_combos[section] = {}
 
@@ -660,6 +677,11 @@ class MainWindow(QMainWindow):
 
             # 三级标题
             self.set_default_format_value("标题", "level3", "黑体", "小四 (12pt)", "左对齐", "固定值20pt")
+
+        if "页码页眉页脚" in self.format_combos:
+            self.set_default_format_value("页码页眉页脚", "page_number", "Times New Roman", "五号 (10.5pt)", "居中", "固定值20pt")
+            self.set_default_format_value("页码页眉页脚", "header", "宋体", "五号 (10.5pt)", "居中", "固定值20pt")
+            self.set_default_format_value("页码页眉页脚", "footer", "宋体", "五号 (10.5pt)", "居中", "固定值20pt")
 
         # 图|表题
         if "图|表题" in self.format_combos:

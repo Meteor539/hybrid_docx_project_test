@@ -230,8 +230,74 @@ def _style_by_id(doc, style_id: str | None):
     return None
 
 
-def _footer_page_number_nodes(section, doc) -> list[dict]:
-    footer = getattr(section, "footer", None)
+def _style_chain(style) -> list:
+    chain = []
+    seen_ids: set[int] = set()
+    current = style
+    while current is not None:
+        marker = id(current)
+        if marker in seen_ids:
+            break
+        seen_ids.add(marker)
+        chain.append(current)
+        current = getattr(current, "base_style", None)
+    return chain
+
+
+def _style_font_size_half_points(style) -> int | None:
+    for item in _style_chain(style):
+        style_font = getattr(item, "font", None)
+        style_size = getattr(style_font, "size", None) if style_font is not None else None
+        if style_size is None:
+            continue
+        try:
+            return int(round(float(style_size.pt) * 2))
+        except Exception:  # noqa: BLE001
+            continue
+    return None
+
+
+def _style_font_name_candidates(style) -> list[str]:
+    candidates: list[str] = []
+    for item in _style_chain(style):
+        style_font = getattr(item, "font", None)
+        style_font_name = getattr(style_font, "name", None) if style_font is not None else None
+        if style_font_name:
+            candidates.append(str(style_font_name))
+    return candidates
+
+
+def _resolve_linked_header_footer(section, section_index: int, sections, attr_name: str):
+    current = getattr(section, attr_name, None)
+    if current is None:
+        return None
+
+    try:
+        if not getattr(current, "is_linked_to_previous", False):
+            return current
+    except Exception:  # noqa: BLE001
+        return current
+
+    for previous_index in range(section_index - 1, -1, -1):
+        previous_section = sections[previous_index]
+        previous = getattr(previous_section, attr_name, None)
+        if previous is None:
+            continue
+        try:
+            if getattr(previous, "is_linked_to_previous", False):
+                continue
+        except Exception:  # noqa: BLE001
+            return previous
+        return previous
+    return current
+
+
+def _footer_page_number_nodes(section, doc, sections=None, section_index: int | None = None) -> list[dict]:
+    footer = (
+        _resolve_linked_header_footer(section, section_index, sections, "footer")
+        if sections is not None and section_index is not None
+        else getattr(section, "footer", None)
+    )
     paragraphs = getattr(footer, "paragraphs", None) if footer is not None else None
     if not paragraphs:
         return []
@@ -244,7 +310,7 @@ def _footer_page_number_nodes(section, doc) -> list[dict]:
             continue
         try:
             page_paras = root.xpath(
-                ".//w:txbxContent//w:p[.//w:instrText[contains(translate(., 'page', 'PAGE'), 'PAGE')]]",
+                ".//w:p[.//w:instrText[contains(translate(., 'page', 'PAGE'), 'PAGE')]]",
                 namespaces=_XML_NS,
             )
         except Exception:  # noqa: BLE001
@@ -269,9 +335,6 @@ def _footer_page_number_nodes(section, doc) -> list[dict]:
 
                 run_nodes = page_para.xpath("./w:r", namespaces=_XML_NS)
                 for run_node in run_nodes:
-                    run_text = "".join(str(token) for token in run_node.xpath("./w:t/text()", namespaces=_XML_NS)).strip()
-                    if not run_text:
-                        continue
                     font_values = run_node.xpath("./w:rPr/w:rFonts/@w:ascii | ./w:rPr/w:rFonts/@w:hAnsi", namespaces=_XML_NS)
                     font_candidates.extend(str(value) for value in font_values if str(value).strip())
                     size_values = run_node.xpath("./w:rPr/w:sz/@w:val", namespaces=_XML_NS)
@@ -285,17 +348,10 @@ def _footer_page_number_nodes(section, doc) -> list[dict]:
 
             style = _style_by_id(doc, style_id)
             if size_half_points is None and style is not None:
-                style_size = getattr(getattr(style, "font", None), "size", None)
-                if style_size is not None:
-                    try:
-                        size_half_points = int(round(float(style_size.pt) * 2))
-                    except Exception:  # noqa: BLE001
-                        pass
+                size_half_points = _style_font_size_half_points(style)
 
             if not font_candidates and style is not None:
-                style_font = getattr(getattr(style, "font", None), "name", None)
-                if style_font:
-                    font_candidates.append(str(style_font))
+                font_candidates.extend(_style_font_name_candidates(style))
 
             node = {
                 "text": text or "页码域",
@@ -318,8 +374,12 @@ def _footer_page_number_nodes(section, doc) -> list[dict]:
     return nodes
 
 
-def _footer_text_nodes(section, doc) -> list[dict]:
-    footer = getattr(section, "footer", None)
+def _footer_text_nodes(section, doc, sections=None, section_index: int | None = None) -> list[dict]:
+    footer = (
+        _resolve_linked_header_footer(section, section_index, sections, "footer")
+        if sections is not None and section_index is not None
+        else getattr(section, "footer", None)
+    )
     paragraphs = getattr(footer, "paragraphs", None) if footer is not None else None
     if not paragraphs:
         return []
@@ -647,6 +707,28 @@ def _create_format_checker(ctx: RuleContext) -> FormatChecker:
             content_rules["line_spacing"] = catalogue_settings.get("content_line_spacing", content_rules["line_spacing"])
 
     return checker
+
+
+def _header_footer_user_settings(ctx: RuleContext, key: str) -> dict:
+    user_formats = ctx.extras.get("user_formats") or {}
+    if not isinstance(user_formats, dict):
+        return {}
+    page_settings = user_formats.get("页码页眉页脚")
+    if not isinstance(page_settings, dict):
+        return {}
+    return {
+        "font": page_settings.get(f"{key}_font"),
+        "size": page_settings.get(f"{key}_size"),
+        "alignment": page_settings.get(f"{key}_align"),
+        "line_spacing": page_settings.get(f"{key}_line_spacing"),
+    }
+
+
+def _expected_font_size_pt(size_text: str | None, default_pt: float) -> float:
+    checker = FormatChecker()
+    if size_text and size_text in checker.size_mapping:
+        return float(checker.size_mapping[size_text])
+    return default_pt
 
 
 def _iter_format_targets(ctx: RuleContext, format_rules: dict):
@@ -2106,27 +2188,37 @@ class PageNumberFormatRule(BaseRule):
         if not sections:
             return []
 
+        expected = _header_footer_user_settings(ctx, "page_number")
+        expected_align = (expected.get("alignment") or "居中").strip()
+        expected_font = (expected.get("font") or "Times New Roman").strip()
+        expected_size_pt = _expected_font_size_pt(expected.get("size"), 10.5)
+
         grouped: dict[tuple[str, tuple[str, ...], tuple[str, ...], int | None], dict] = {}
         for index, section in enumerate(sections, start=1):
-            page_nodes = _footer_page_number_nodes(section, doc)
+            page_nodes = _footer_page_number_nodes(section, doc, sections, index - 1)
             if not page_nodes:
                 continue
 
             for node_index, node in enumerate(page_nodes, start=1):
                 problems: list[str] = []
-                if node.get("align") not in {None, "center"}:
+                actual_align = node.get("align")
+                if expected_align == "居中" and actual_align not in {None, "center"}:
                     problems.append("页码所在页脚段落可能未居中")
+                elif expected_align == "左对齐" and actual_align not in {None, "left"}:
+                    problems.append("页码所在页脚段落可能未左对齐")
+                elif expected_align == "右对齐" and actual_align not in {None, "right"}:
+                    problems.append("页码所在页脚段落可能未右对齐")
 
                 size_half_points = node.get("size_half_points")
                 if size_half_points is not None:
                     actual_pt = size_half_points / 2.0
-                    if abs(actual_pt - 10.5) > 0.5:
-                        problems.append("页码字号可能不是五号")
+                    if abs(actual_pt - expected_size_pt) > 0.5:
+                        problems.append(f"页码字号可能不是{expected.get('size') or '五号'}")
 
                 font_candidates = node.get("font_candidates") or []
                 if font_candidates:
-                    if not any(self.format_checker._is_font_equivalent("Times New Roman", candidate) for candidate in font_candidates):
-                        problems.append("页码字体可能不是Times New Roman")
+                    if not any(self.format_checker._is_font_equivalent(expected_font, candidate) for candidate in font_candidates):
+                        problems.append(f"页码字体可能不是{expected_font}")
 
                 if not problems:
                     continue
@@ -2152,7 +2244,7 @@ class PageNumberFormatRule(BaseRule):
 
         issues: list[Issue] = []
         for order, bucket in enumerate(grouped.values(), start=1):
-            sections_text = "、".join(f"第{item}节" for item in bucket["sections"])
+            sections_text = "、".join(f"第{item}章" for item in bucket["sections"])
             content = f"{sections_text}页码域"
             _append_issue(
                 issues,
@@ -2194,27 +2286,37 @@ class FooterFormatRule(BaseRule):
         if not sections:
             return []
 
+        expected = _header_footer_user_settings(ctx, "footer")
+        expected_align = (expected.get("alignment") or "居中").strip()
+        expected_font = (expected.get("font") or "宋体").strip()
+        expected_size_pt = _expected_font_size_pt(expected.get("size"), 10.5)
+
         issues: list[Issue] = []
         for index, section in enumerate(sections, start=1):
-            footer_nodes = _footer_text_nodes(section, doc)
+            footer_nodes = _footer_text_nodes(section, doc, sections, index - 1)
             if not footer_nodes:
                 continue
 
             for node_index, node in enumerate(footer_nodes, start=1):
                 problems: list[str] = []
-                if node.get("align") not in {None, "center"}:
+                actual_align = node.get("align")
+                if expected_align == "居中" and actual_align not in {None, "center"}:
                     problems.append("页脚可能未居中")
+                elif expected_align == "左对齐" and actual_align not in {None, "left"}:
+                    problems.append("页脚可能未左对齐")
+                elif expected_align == "右对齐" and actual_align not in {None, "right"}:
+                    problems.append("页脚可能未右对齐")
 
                 size_half_points = node.get("size_half_points")
                 if size_half_points is not None:
                     actual_pt = size_half_points / 2.0
-                    if abs(actual_pt - 10.5) > 0.5:
-                        problems.append("页脚字号可能不是五号")
+                    if abs(actual_pt - expected_size_pt) > 0.5:
+                        problems.append(f"页脚字号可能不是{expected.get('size') or '五号'}")
 
                 font_candidates = node.get("font_candidates") or []
                 if font_candidates:
-                    if not any(self.format_checker._is_font_equivalent("宋体", candidate) for candidate in font_candidates):
-                        problems.append("页脚字体可能不是宋体")
+                    if not any(self.format_checker._is_font_equivalent(expected_font, candidate) for candidate in font_candidates):
+                        problems.append(f"页脚字体可能不是{expected_font}")
 
                 if not problems:
                     continue
@@ -2333,8 +2435,12 @@ class HeaderFormatRule(BaseRule):
 
         issues: list[Issue] = []
         expected_text = "武汉理工大学毕业设计（论文）"
+        expected = _header_footer_user_settings(ctx, "header")
+        expected_align = (expected.get("alignment") or "居中").strip()
+        expected_font = (expected.get("font") or "宋体").strip()
+        expected_size_pt = _expected_font_size_pt(expected.get("size"), 10.5)
         for index, section in enumerate(sections, start=1):
-            header = getattr(section, "header", None)
+            header = _resolve_linked_header_footer(section, index - 1, sections, "header")
             header_paragraphs = getattr(header, "paragraphs", None) if header is not None else None
             meaningful = list(_iter_nonempty_paragraphs(header_paragraphs))
             if not meaningful:
@@ -2355,7 +2461,7 @@ class HeaderFormatRule(BaseRule):
                     )
 
                 actual_alignment = getattr(paragraph, "alignment", None)
-                if actual_alignment not in (None, WD_ALIGN_PARAGRAPH.CENTER):
+                if expected_align == "居中" and actual_alignment not in (None, WD_ALIGN_PARAGRAPH.CENTER):
                     _append_issue(
                         issues,
                         rule_id=f"{self.rule_id}.align.{index}.{para_index}",
@@ -2366,17 +2472,39 @@ class HeaderFormatRule(BaseRule):
                         content=text,
                         metadata={"section_index": index, "paragraph_index": para_index},
                     )
+                elif expected_align == "左对齐" and actual_alignment not in (None, WD_ALIGN_PARAGRAPH.LEFT):
+                    _append_issue(
+                        issues,
+                        rule_id=f"{self.rule_id}.align.{index}.{para_index}",
+                        title="页眉",
+                        message=text,
+                        problem="页眉可能未左对齐",
+                        section="页眉",
+                        content=text,
+                        metadata={"section_index": index, "paragraph_index": para_index},
+                    )
+                elif expected_align == "右对齐" and actual_alignment not in (None, WD_ALIGN_PARAGRAPH.RIGHT):
+                    _append_issue(
+                        issues,
+                        rule_id=f"{self.rule_id}.align.{index}.{para_index}",
+                        title="页眉",
+                        message=text,
+                        problem="页眉可能未右对齐",
+                        section="页眉",
+                        content=text,
+                        metadata={"section_index": index, "paragraph_index": para_index},
+                    )
 
                 font_problem = False
                 size_problem = False
                 for run in _nonempty_runs(paragraph):
                     candidate_fonts = self.format_checker._get_run_font_candidates(run)
                     if candidate_fonts and not any(
-                        self.format_checker._is_font_equivalent("宋体", candidate) for candidate in candidate_fonts
+                        self.format_checker._is_font_equivalent(expected_font, candidate) for candidate in candidate_fonts
                     ):
                         font_problem = True
                     actual_size = run.font.size.pt if run.font.size else None
-                    if actual_size is not None and abs(actual_size - 10.5) > 0.5:
+                    if actual_size is not None and abs(actual_size - expected_size_pt) > 0.5:
                         size_problem = True
 
                 if font_problem:
@@ -2385,7 +2513,7 @@ class HeaderFormatRule(BaseRule):
                         rule_id=f"{self.rule_id}.font.{index}.{para_index}",
                         title="页眉",
                         message=text,
-                        problem="页眉字体可能不是宋体五号",
+                        problem=f"页眉字体可能不是{expected_font}",
                         section="页眉",
                         content=text,
                         metadata={"section_index": index, "paragraph_index": para_index},
@@ -2396,7 +2524,7 @@ class HeaderFormatRule(BaseRule):
                         rule_id=f"{self.rule_id}.size.{index}.{para_index}",
                         title="页眉",
                         message=text,
-                        problem="页眉字号可能不是五号",
+                        problem=f"页眉字号可能不是{expected.get('size') or '五号'}",
                         section="页眉",
                         content=text,
                         metadata={"section_index": index, "paragraph_index": para_index},
