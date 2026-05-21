@@ -336,6 +336,11 @@ class HeadingPunctuationRule(BaseRule):
     engine = "docx"
 
     _punctuation_pattern = re.compile(r"[，。！？；：、,.!?;:()\[\]【】《》<>“”\"'‘’·—\-]")
+    _inline_hyphen_pattern = re.compile(r"(?<=[A-Za-z0-9])-(?=[A-Za-z0-9])")
+
+    @classmethod
+    def _normalized_title_body(cls, text: str) -> str:
+        return cls._inline_hyphen_pattern.sub("", text or "")
 
     def check(self, ctx: RuleContext) -> list[Issue]:
         if ctx.extras.get("docx_parse_error"):
@@ -355,7 +360,8 @@ class HeadingPunctuationRule(BaseRule):
                 title_body = _strip_heading_prefix(text)
                 if not title_body:
                     continue
-                if not self._punctuation_pattern.search(title_body):
+                normalized_title_body = self._normalized_title_body(title_body)
+                if not self._punctuation_pattern.search(normalized_title_body):
                     continue
                 issues.append(
                     Issue(

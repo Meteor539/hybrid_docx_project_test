@@ -64,6 +64,61 @@ def top_area_texts(page) -> list[str]:
     return texts
 
 
+def top_area_lines(page, top_ratio: float = 0.25) -> list[str]:
+    page_height = float(getattr(page, "height", 0.0) or 0.0)
+    if page_height <= 0:
+        return []
+
+    rows = []
+    spans = sorted(
+        [span for span in getattr(page, "spans", []) if getattr(span, "text", "").strip()],
+        key=lambda item: ((item.bbox[1] + item.bbox[3]) / 2, item.bbox[0]),
+    )
+    for span in spans:
+        bbox = getattr(span, "bbox", None) or []
+        if len(bbox) != 4:
+            continue
+        x0, y0, x1, y1 = [float(value) for value in bbox]
+        if y1 > page_height * top_ratio:
+            continue
+
+        center_y = (y0 + y1) / 2
+        target_row = None
+        for row in rows:
+            if abs(center_y - row["center_y"]) <= 4.0:
+                target_row = row
+                break
+        if target_row is None:
+            target_row = {"center_y": center_y, "items": []}
+            rows.append(target_row)
+        target_row["items"].append({"text": span.text.strip(), "bbox": [x0, y0, x1, y1]})
+
+    lines = []
+    for row in rows:
+        items = sorted(row["items"], key=lambda item: item["bbox"][0])
+        text = "".join(item["text"] for item in items).strip()
+        if text:
+            lines.append(text)
+    return lines
+
+
+def page_has_top_heading(page, keywords: tuple[str, ...]) -> bool:
+    normalized_keywords = {normalize_text(keyword) for keyword in keywords if keyword}
+    if not normalized_keywords:
+        return False
+
+    for line in top_area_lines(page):
+        compact = normalize_text(line)
+        if not compact:
+            continue
+        for keyword in normalized_keywords:
+            if compact == keyword:
+                return True
+            if compact.startswith(keyword) and len(compact) <= max(len(keyword) + 8, 20):
+                return True
+    return False
+
+
 def looks_like_backmatter_start(page) -> bool:
     texts = top_area_texts(page)
     if not texts:
@@ -119,9 +174,9 @@ def build_page_roles(pages) -> dict[int, str]:
         page_no = getattr(page, "page_no", idx + 1)
         if roles.get(page_no) == PAGE_ROLE_CATALOGUE:
             continue
-        if page_has_heading(page, ("摘要",)) and not page_has_heading(page, ("ABSTRACT", "Abstract")):
+        if page_has_top_heading(page, ("摘要",)) and not page_has_top_heading(page, ("ABSTRACT", "Abstract")):
             roles[page_no] = PAGE_ROLE_CN_ABSTRACT
-        elif page_has_heading(page, ("ABSTRACT", "Abstract")):
+        elif page_has_top_heading(page, ("ABSTRACT", "Abstract")):
             roles[page_no] = PAGE_ROLE_EN_ABSTRACT
 
     return roles

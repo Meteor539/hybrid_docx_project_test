@@ -1006,7 +1006,8 @@ class MainWindow(QMainWindow):
         summary = result.get("summary", {})
         engine_counts = result.get("engine_counts", {})
         context_status = result.get("context_status", {})
-        issues = self.sort_and_number_issues(result.get("issues", []))
+        raw_issues = list(result.get("issues", []) or [])
+        issues = self.sort_and_number_issues(self.aggregate_display_issues(raw_issues))
 
         visualization_widget = self.create_issue_visualization_widget(context_status, issues)
         self.visual_layout.addWidget(visualization_widget)
@@ -1148,12 +1149,11 @@ class MainWindow(QMainWindow):
 
     def format_issue_block(self, issue):
         index = issue.get("display_index", "")
-        severity = str(issue.get("severity", "info")).strip().lower() or "info"
         section = self.resolve_issue_section_label(issue)
         content = self.resolve_issue_content_text(issue)
         problem = self.resolve_issue_problem_text(issue)
         return (
-            f"{index}. [{severity}] {section}\n"
+            f"{index}. {section}\n"
             f"出错内容：{content}\n"
             f"错误描述：{problem}"
         )
@@ -1209,6 +1209,126 @@ class MainWindow(QMainWindow):
             numbered.append(copied)
         return numbered
 
+    @staticmethod
+    def extract_chapter_info(label):
+        text = str(label or "").strip()
+        match = re.match(r"^第(\d+)章(?:\s+|$)(.*)$", text)
+        if not match:
+            return None
+        chapter_no = int(match.group(1))
+        chapter_title = match.group(2).strip()
+        return {"number": chapter_no, "title": chapter_title, "label": text}
+
+    @classmethod
+    def build_issue_range_label(cls, labels):
+        normalized_labels = []
+        seen = set()
+        for label in labels or []:
+            text = str(label or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            normalized_labels.append(text)
+        if not normalized_labels:
+            return ""
+
+        chapter_infos = []
+        for label in normalized_labels:
+            info = cls.extract_chapter_info(label)
+            if info is None:
+                return "、".join(normalized_labels)
+            chapter_infos.append(info)
+
+        chapter_infos.sort(key=lambda item: item["number"])
+        if len(chapter_infos) == 1:
+            return chapter_infos[0]["label"]
+
+        numbers = [item["number"] for item in chapter_infos]
+        expected = list(range(numbers[0], numbers[0] + len(numbers)))
+        if numbers != expected:
+            return "、".join(item["label"] for item in chapter_infos)
+
+        first = chapter_infos[0]
+        last = chapter_infos[-1]
+        if last["title"]:
+            return f"第{first['number']}章至第{last['number']}章（{last['title']}）"
+        return f"第{first['number']}章至第{last['number']}章"
+
+    @classmethod
+    def aggregate_display_issues(cls, issues):
+        aggregated_groups = {}
+        passthrough = []
+        target_rule_ids = {
+            "docx.stage2.page_number_format",
+            "docx.stage2.header_format",
+            "docx.stage2.footer_format",
+        }
+
+        for issue in list(issues or []):
+            metadata = dict(issue.get("metadata") or {})
+            rule_id = str(issue.get("rule_id") or "")
+            base_rule_id = ".".join(rule_id.split(".")[:4]) if rule_id else ""
+            section_label = str(metadata.get("section_summary_label") or "").strip()
+            if base_rule_id not in target_rule_ids or not section_label:
+                passthrough.append(dict(issue))
+                continue
+
+            key = (
+                base_rule_id,
+                str(issue.get("source") or ""),
+                str(issue.get("severity") or ""),
+                str(issue.get("title") or ""),
+                str(metadata.get("problem") or issue.get("message") or ""),
+            )
+            bucket = aggregated_groups.setdefault(key, [])
+            bucket.append(dict(issue))
+
+        aggregated = list(passthrough)
+        for key, group in aggregated_groups.items():
+            chapter_items = []
+            other_items = []
+            for issue in group:
+                metadata = issue.get("metadata") or {}
+                label = str(metadata.get("section_summary_label") or "").strip()
+                chapter_info = cls.extract_chapter_info(label)
+                if chapter_info is None:
+                    other_items.append(issue)
+                else:
+                    chapter_items.append((chapter_info, issue))
+
+            aggregated.extend(other_items)
+            if not chapter_items:
+                continue
+
+            chapter_items.sort(key=lambda item: item[0]["number"])
+            run = []
+            previous_no = None
+            for chapter_info, issue in chapter_items:
+                current_no = chapter_info["number"]
+                if run and previous_no is not None and current_no != previous_no + 1:
+                    aggregated.append(cls.build_aggregated_issue(run))
+                    run = []
+                run.append((chapter_info, issue))
+                previous_no = current_no
+            if run:
+                aggregated.append(cls.build_aggregated_issue(run))
+
+        return aggregated
+
+    @classmethod
+    def build_aggregated_issue(cls, chapter_issue_run):
+        labels = [item[0]["label"] for item in chapter_issue_run]
+        child_issues = [dict(item[1]) for item in chapter_issue_run]
+        base_issue = dict(child_issues[0])
+        metadata = dict(base_issue.get("metadata") or {})
+        metadata["aggregated_section_labels"] = labels
+        metadata["section_summary_label"] = cls.build_issue_range_label(labels)
+        metadata["aggregated_count"] = len(child_issues)
+        metadata["aggregated_children"] = child_issues
+        base_issue["metadata"] = metadata
+        base_issue["message"] = f"{metadata['section_summary_label']}{str(base_issue.get('title') or '').strip()}域"
+        return base_issue
+
     def build_overview_text(self, summary, engine_counts, context_status):
         """构建检查概览文本。"""
         docx_error = context_status.get("docx_parse_error")
@@ -1233,7 +1353,6 @@ class MainWindow(QMainWindow):
 
         return (
             f"总问题数：{summary.get('total', 0)}\n"
-            f"错误：{summary.get('errors', 0)}，警告：{summary.get('warnings', 0)}，提示：{summary.get('infos', 0)}\n"
             f"{docx_status}\n"
             f"{pdf_status}"
         )
@@ -1372,7 +1491,29 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def normalize_match_text(text):
-        return re.sub(r"[\s\u3000]+", "", str(text or "")).strip()
+        text = str(text or "")
+        translation = str.maketrans(
+            {
+                "－": "-",
+                "—": "-",
+                "–": "-",
+                "‑": "-",
+                "‒": "-",
+                "―": "-",
+                "．": ".",
+                "：": ":",
+                "（": "(",
+                "）": ")",
+                "【": "[",
+                "】": "]",
+            }
+        )
+        return re.sub(r"[\s\u3000]+", "", text.translate(translation)).strip()
+
+    @classmethod
+    def normalize_loose_match_text(cls, text):
+        normalized = cls.normalize_match_text(text)
+        return re.sub(r"[\-.,:;!?()\[\]\"'`~@#$%^&*_+=<>/\\|{}]+", "", normalized)
 
     @staticmethod
     def group_page_lines(page):
@@ -1573,6 +1714,152 @@ class MainWindow(QMainWindow):
                 best_match = self.choose_better_match(best_match, score, page_no, line["bbox"])
         return best_match
 
+    def locate_heading_bbox(self, issue, pdf_pages, page_roles=None):
+        section_label = self.resolve_issue_section_label(issue)
+        if section_label not in {"标题", "章节标题", "一级标题", "二级标题", "三级标题"}:
+            return None
+
+        metadata = issue.get("metadata") or {}
+        heading_text = str(metadata.get("content") or metadata.get("original_content") or issue.get("message") or "").strip()
+        if not heading_text:
+            return None
+
+        normalized_heading = self.normalize_match_text(heading_text)
+        loose_heading = self.normalize_loose_match_text(heading_text)
+        if len(normalized_heading) < 4:
+            return None
+
+        title_body = self.normalize_match_text(metadata.get("title_body"))
+        loose_title_body = self.normalize_loose_match_text(metadata.get("title_body"))
+        page_roles = page_roles or self.build_pdf_page_roles(pdf_pages)
+        best_match = None
+
+        def scan_pages(page_iter, *, role_penalty=0):
+            nonlocal best_match
+            for page, page_no in page_iter:
+                for line in self.group_page_lines(page):
+                    line_text = self.normalize_match_text(line["text"])
+                    loose_line_text = self.normalize_loose_match_text(line["text"])
+                    if len(line_text) < 4:
+                        continue
+
+                    score = None
+                    if line_text == normalized_heading:
+                        score = 5000
+                    elif normalized_heading in line_text:
+                        score = 4200 - max(0, len(line_text) - len(normalized_heading)) * 4
+                    elif title_body and title_body in line_text:
+                        score = 3200 - max(0, len(line_text) - len(title_body)) * 5
+                    elif loose_heading and loose_line_text == loose_heading:
+                        score = 3000
+                    elif loose_heading and loose_heading in loose_line_text:
+                        score = 2600 - max(0, len(loose_line_text) - len(loose_heading)) * 4
+                    elif loose_title_body and loose_title_body in loose_line_text:
+                        score = 2200 - max(0, len(loose_line_text) - len(loose_title_body)) * 5
+
+                    if score is None:
+                        continue
+
+                    page_height = float(getattr(page, "height", 0.0) or 0.0)
+                    if page_height > 0:
+                        center_y = (line["bbox"][1] + line["bbox"][3]) / 2
+                        if center_y <= page_height * 0.10 or center_y >= page_height * 0.88:
+                            score -= 400
+
+                    best_match = self.choose_better_match(best_match, score - role_penalty, page_no, line["bbox"])
+
+        scan_pages(self.iter_issue_candidate_pages(issue, pdf_pages, page_roles))
+        if best_match is None:
+            scan_pages(((page, int(getattr(page, "page_no", 0) or 0)) for page in pdf_pages), role_penalty=300)
+        return best_match
+
+    def locate_formula_bbox(self, issue, pdf_pages, page_roles=None):
+        section_label = self.resolve_issue_section_label(issue)
+        if section_label not in {"公式内容", "公式编号"}:
+            return None
+
+        metadata = issue.get("metadata") or {}
+        raw_text = " ".join(
+            str(value or "")
+            for value in (
+                metadata.get("original_content"),
+                metadata.get("content"),
+                issue.get("message"),
+            )
+            if str(value or "").strip()
+        )
+        if not raw_text:
+            return None
+
+        match = re.search(r"[（(]\s*([A-Z]?\d+(?:\.\d+)*)\s*[)）]", raw_text)
+        if not match:
+            return None
+
+        marker_core = match.group(1)
+        marker_candidates = {
+            self.normalize_match_text(f"({marker_core})"),
+            self.normalize_match_text(f"（{marker_core}）"),
+        }
+        marker_candidates = {item for item in marker_candidates if item}
+        if not marker_candidates:
+            return None
+
+        page_roles = page_roles or self.build_pdf_page_roles(pdf_pages)
+        best_match = None
+
+        def formula_line_bbox(page, target_bbox):
+            target_center_y = (target_bbox[1] + target_bbox[3]) / 2
+            same_line_boxes = []
+            for span in getattr(page, "spans", []) or []:
+                text = str(getattr(span, "text", "") or "").strip()
+                bbox = getattr(span, "bbox", None) or []
+                if not text or len(bbox) != 4:
+                    continue
+                box = [float(value) for value in bbox]
+                center_y = (box[1] + box[3]) / 2
+                if abs(center_y - target_center_y) <= 4.0:
+                    same_line_boxes.append(box)
+            if not same_line_boxes:
+                return [float(value) for value in target_bbox]
+            return self.merge_bboxes(same_line_boxes) or [float(value) for value in target_bbox]
+
+        def scan_pages(page_iter, *, role_penalty=0):
+            nonlocal best_match
+            for page, page_no in page_iter:
+                page_height = float(getattr(page, "height", 0.0) or 0.0)
+                for span in getattr(page, "spans", []) or []:
+                    span_text = str(getattr(span, "text", "") or "").strip()
+                    bbox = getattr(span, "bbox", None) or []
+                    if not span_text or len(bbox) != 4:
+                        continue
+
+                    normalized_span = self.normalize_match_text(span_text)
+                    if normalized_span not in marker_candidates:
+                        continue
+
+                    target_bbox = [float(value) for value in bbox]
+                    line_bbox = formula_line_bbox(page, target_bbox)
+                    score = 4200
+                    if normalized_span == self.normalize_match_text(f"({marker_core})"):
+                        score += 80
+                    if section_label == "公式内容":
+                        target_bbox = line_bbox
+                        score += 120
+                    else:
+                        score += 40
+
+                    if page_height > 0:
+                        center_y = (line_bbox[1] + line_bbox[3]) / 2
+                        if center_y <= page_height * 0.10 or center_y >= page_height * 0.88:
+                            score -= 300
+
+                    best_match = self.choose_better_match(best_match, score - role_penalty, page_no, target_bbox)
+
+        scan_pages(self.iter_issue_candidate_pages(issue, pdf_pages, page_roles))
+        if best_match is None:
+            scan_pages(((page, int(getattr(page, "page_no", 0) or 0)) for page in pdf_pages), role_penalty=300)
+        return best_match
+
     def locate_reference_entry_boxes(self, issue, pdf_pages, page_roles=None):
         section_label = self.resolve_issue_section_label(issue)
         if section_label != "参考文献内容":
@@ -1629,6 +1916,14 @@ class MainWindow(QMainWindow):
         if marker_located is not None:
             return marker_located
 
+        heading_located = self.locate_heading_bbox(issue, pdf_pages, page_roles=page_roles)
+        if heading_located is not None:
+            return heading_located
+
+        formula_located = self.locate_formula_bbox(issue, pdf_pages, page_roles=page_roles)
+        if formula_located is not None:
+            return formula_located
+
         candidates = self.build_issue_search_candidates(issue)
         if not candidates:
             return None
@@ -1668,44 +1963,49 @@ class MainWindow(QMainWindow):
         visual_issues = []
         page_roles = self.build_pdf_page_roles(pdf_pages)
         for issue in issues:
-            source = issue.get("source")
-            page = issue.get("page")
-            bbox = issue.get("bbox")
-            if isinstance(page, int) and page > 0 and isinstance(bbox, (list, tuple)) and len(bbox) == 4:
-                try:
-                    x1, y1, x2, y2 = [float(value) for value in bbox]
-                except Exception:
-                    x1 = y1 = x2 = y2 = 0.0
-                if x2 > x1 and y2 > y1:
-                    visual_issue = dict(issue)
-                    visual_issue["bbox"] = [x1, y1, x2, y2]
-                    visual_issue["visual_source"] = source
-                    visual_issues.append(visual_issue)
+            child_issues = ((issue.get("metadata") or {}).get("aggregated_children") or [issue])
+            for child_index, child_issue in enumerate(child_issues, start=1):
+                source = child_issue.get("source")
+                page = child_issue.get("page")
+                bbox = child_issue.get("bbox")
+                if isinstance(page, int) and page > 0 and isinstance(bbox, (list, tuple)) and len(bbox) == 4:
+                    try:
+                        x1, y1, x2, y2 = [float(value) for value in bbox]
+                    except Exception:
+                        x1 = y1 = x2 = y2 = 0.0
+                    if x2 > x1 and y2 > y1:
+                        visual_issue = dict(issue)
+                        visual_issue["page"] = page
+                        visual_issue["bbox"] = [x1, y1, x2, y2]
+                        visual_issue["visual_source"] = source
+                        visual_issue["visual_instance"] = child_index
+                        visual_issues.append(visual_issue)
+                        continue
+
+                if source != "docx":
                     continue
 
-            if source != "docx":
-                continue
+                reference_locations = self.locate_reference_entry_boxes(child_issue, pdf_pages, page_roles=page_roles)
+                if reference_locations:
+                    for idx, located in enumerate(reference_locations, start=1):
+                        visual_issue = dict(issue)
+                        visual_issue["page"] = located["page"]
+                        visual_issue["bbox"] = located["bbox"]
+                        visual_issue["visual_source"] = "docx_reference_located"
+                        visual_issue["visual_instance"] = idx
+                        visual_issues.append(visual_issue)
+                    continue
 
-            reference_locations = self.locate_reference_entry_boxes(issue, pdf_pages, page_roles=page_roles)
-            if reference_locations:
-                for idx, located in enumerate(reference_locations, start=1):
-                    visual_issue = dict(issue)
-                    visual_issue["page"] = located["page"]
-                    visual_issue["bbox"] = located["bbox"]
-                    visual_issue["visual_source"] = "docx_reference_located"
-                    visual_issue["visual_instance"] = idx
-                    visual_issues.append(visual_issue)
-                continue
+                located = self.locate_docx_issue_bbox(child_issue, pdf_pages, page_roles=page_roles)
+                if not located:
+                    continue
 
-            located = self.locate_docx_issue_bbox(issue, pdf_pages, page_roles=page_roles)
-            if not located:
-                continue
-
-            visual_issue = dict(issue)
-            visual_issue["page"] = located["page"]
-            visual_issue["bbox"] = located["bbox"]
-            visual_issue["visual_source"] = "docx_located"
-            visual_issues.append(visual_issue)
+                visual_issue = dict(issue)
+                visual_issue["page"] = located["page"]
+                visual_issue["bbox"] = located["bbox"]
+                visual_issue["visual_source"] = "docx_located"
+                visual_issue["visual_instance"] = child_index
+                visual_issues.append(visual_issue)
         return visual_issues
 
     def update_issue_visualization_page(self, page_no, image_label, page_issue_label):
@@ -1714,12 +2014,7 @@ class MainWindow(QMainWindow):
         pdf_path = state.get("pdf_path")
         visual_issues = state.get("issues") or []
         page_issues = [issue for issue in visual_issues if issue.get("page") == page_no]
-        error_count = sum(1 for issue in page_issues if str(issue.get("severity")).lower() == "error")
-        warning_count = sum(1 for issue in page_issues if str(issue.get("severity")).lower() == "warning")
-        info_count = sum(1 for issue in page_issues if str(issue.get("severity")).lower() == "info")
-        page_issue_label.setText(
-            f"当前页可标注问题数：{len(page_issues)}（错误：{error_count}，警告：{warning_count}，提示：{info_count}）"
-        )
+        page_issue_label.setText(f"当前页可标注问题数：{len(page_issues)}")
 
         if not pdf_path:
             image_label.setText("未找到可用于标注的 PDF。")
@@ -1768,9 +2063,9 @@ class MainWindow(QMainWindow):
         painter.setFont(font)
 
         for issue in page_issues:
-            color = self.get_issue_draw_color(issue.get("severity"))
+            color = self.get_issue_draw_color()
             pen = QPen(color)
-            pen.setWidth(3 if str(issue.get("severity")).lower() == "error" else 2)
+            pen.setWidth(3)
             painter.setPen(pen)
 
             x1, y1, x2, y2 = issue["bbox"]
@@ -1885,13 +2180,8 @@ class MainWindow(QMainWindow):
         self.result_scroll.ensureWidgetVisible(target_widget, 20, 20)
 
     @staticmethod
-    def get_issue_draw_color(severity):
-        severity = str(severity or "info").strip().lower()
-        if severity == "error":
-            return QColor(220, 53, 69)
-        if severity == "warning":
-            return QColor(255, 193, 7)
-        return QColor(13, 110, 253)
+    def get_issue_draw_color(_severity=None):
+        return QColor(220, 53, 69)
 
     def get_section_name(self, section_key):
         """根据section键获取中文名称"""

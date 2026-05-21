@@ -36,6 +36,16 @@ def _paragraph_text(paragraph) -> str:
     return str(getattr(paragraph, "text", "") or "").strip()
 
 
+def _paragraph_has_numbering(paragraph) -> bool:
+    root = _paragraph_xml_root(paragraph)
+    if root is None:
+        return False
+    try:
+        return bool(root.xpath("./w:pPr/w:numPr", namespaces=_XML_NS))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _paragraph_xml_root(paragraph):
     element = getattr(paragraph, "_element", None)
     if element is None:
@@ -218,6 +228,56 @@ def _iter_citation_runs(paragraph):
             yield match.group(0), run, run_text
 
 
+def _looks_like_example_citation_context(text: str, marker_text: str) -> bool:
+    raw_text = str(text or "")
+    marker = str(marker_text or "").strip()
+    if not raw_text or not marker:
+        return False
+
+    start = raw_text.find(marker)
+    if start < 0:
+        compact_text = re.sub(r"\s+", "", raw_text)
+        compact_marker = re.sub(r"\s+", "", marker)
+        start = compact_text.find(compact_marker)
+        if start < 0:
+            return False
+        raw_text = compact_text
+        marker = compact_marker
+
+    prefix = raw_text[max(0, start - 16) : start]
+    suffix = raw_text[start + len(marker) : start + len(marker) + 16]
+    window = f"{prefix}{marker}{suffix}"
+
+    example_keywords = (
+        "例如",
+        "比如",
+        "譬如",
+        "示例",
+        "样例",
+        "形如",
+        "写成",
+        "写作",
+        "表示为",
+        "记为",
+        "方括号",
+        "括号",
+        "编号",
+        "标号",
+        "标记",
+        "标识",
+        "marker",
+        "metadata",
+    )
+    if any(keyword in window for keyword in example_keywords):
+        return True
+
+    example_patterns = (
+        rf"(例如|比如|譬如)\s*{re.escape(marker)}",
+        rf"{re.escape(marker)}\s*(这类|这种|这样的)?\s*(标记|标识|编号|方括号)",
+    )
+    return any(re.search(pattern, raw_text, flags=re.IGNORECASE) for pattern in example_patterns)
+
+
 def _style_by_id(doc, style_id: str | None):
     if doc is None or not style_id:
         return None
@@ -267,6 +327,89 @@ def _style_font_name_candidates(style) -> list[str]:
     return candidates
 
 
+def _extract_first_int_xpath(node, expressions: list[str]) -> int | None:
+    for expression in expressions:
+        try:
+            values = node.xpath(expression, namespaces=_XML_NS)
+        except Exception:  # noqa: BLE001
+            values = []
+        if not values:
+            continue
+        for value in values:
+            try:
+                return int(value)
+            except Exception:  # noqa: BLE001
+                continue
+    return None
+
+
+def _extract_font_values_xpath(node, expression: str) -> list[str]:
+    try:
+        values = node.xpath(expression, namespaces=_XML_NS)
+    except Exception:  # noqa: BLE001
+        return []
+    return [str(value) for value in values if str(value).strip()]
+
+
+def _is_builtin_header_footer_style(style_id: str | None) -> bool:
+    return str(style_id or "").strip() in {"Footer", "Header", "ab", "ad"}
+
+
+def _looks_like_plain_page_number_text(text: str) -> bool:
+    compact = str(text or "").strip()
+    if not compact:
+        return False
+    if re.fullmatch(r"\d{1,4}", compact):
+        return True
+    return bool(re.fullmatch(r"[IVXLCDMivxlcdm]{1,8}", compact))
+
+
+def _extract_para_style_snapshot(para_node, doc) -> dict:
+    style_values = para_node.xpath("./w:pPr/w:pStyle/@w:val", namespaces=_XML_NS)
+    style_id = str(style_values[0]) if style_values else None
+    align_values = para_node.xpath("./w:pPr/w:jc/@w:val", namespaces=_XML_NS)
+    align = str(align_values[0]).lower() if align_values else None
+    text_tokens = para_node.xpath(".//w:t/text()", namespaces=_XML_NS)
+    text = "".join(str(token) for token in text_tokens).strip()
+
+    font_candidates: list[str] = []
+    for run_node in para_node.xpath("./w:r", namespaces=_XML_NS):
+        run_text = "".join(str(token) for token in run_node.xpath("./w:t/text()", namespaces=_XML_NS)).strip()
+        if not run_text:
+            continue
+        font_candidates.extend(
+            _extract_font_values_xpath(
+                run_node,
+                "./w:rPr/w:rFonts/@w:ascii | ./w:rPr/w:rFonts/@w:hAnsi | ./w:rPr/w:rFonts/@w:eastAsia",
+            )
+        )
+
+    explicit_size_half_points = _extract_first_int_xpath(
+        para_node,
+        [
+            "./w:pPr/w:rPr/w:sz/@w:val",
+            "./w:r/w:rPr/w:sz/@w:val",
+        ],
+    )
+    size_half_points = explicit_size_half_points
+
+    style = _style_by_id(doc, style_id)
+    if size_half_points is None and style is not None and not _is_builtin_header_footer_style(style_id):
+        size_half_points = _style_font_size_half_points(style)
+
+    if not font_candidates and style is not None:
+        font_candidates.extend(_style_font_name_candidates(style))
+
+    return {
+        "text": text,
+        "align": align,
+        "style_id": style_id,
+        "font_candidates": font_candidates,
+        "size_half_points": size_half_points,
+        "size_explicit": explicit_size_half_points is not None,
+    }
+
+
 def _resolve_linked_header_footer(section, section_index: int, sections, attr_name: str):
     current = getattr(section, attr_name, None)
     if current is None:
@@ -290,6 +433,200 @@ def _resolve_linked_header_footer(section, section_index: int, sections, attr_na
             return previous
         return previous
     return current
+
+
+def _section_break_paragraph_indices(doc) -> list[int]:
+    paragraphs = getattr(doc, "paragraphs", None) or []
+    indices: list[int] = []
+    for index, paragraph in enumerate(paragraphs):
+        try:
+            ppr = paragraph._p.pPr  # noqa: SLF001
+        except Exception:  # noqa: BLE001
+            continue
+        if ppr is not None and getattr(ppr, "sectPr", None) is not None:
+            indices.append(index)
+    return indices
+
+
+def _section_start_paragraph_indices(doc) -> list[int]:
+    paragraphs = getattr(doc, "paragraphs", None) or []
+    if not paragraphs:
+        return []
+
+    starts = [0]
+    for break_index in _section_break_paragraph_indices(doc):
+        next_index = break_index + 1
+        if next_index < len(paragraphs):
+            starts.append(next_index)
+    return starts
+
+
+def _section_leading_text(doc, section_index: int) -> str:
+    paragraphs = getattr(doc, "paragraphs", None) or []
+    starts = _section_start_paragraph_indices(doc)
+    if not paragraphs or section_index < 0 or section_index >= len(starts):
+        return ""
+
+    start = starts[section_index]
+    end = starts[section_index + 1] if section_index + 1 < len(starts) else len(paragraphs)
+    for paragraph in paragraphs[start:end]:
+        text = _paragraph_text(paragraph)
+        if text:
+            return re.sub(r"\s+", " ", text)
+    return ""
+
+
+def _section_paragraph_span(doc, section_index: int) -> tuple[int, int] | None:
+    paragraphs = getattr(doc, "paragraphs", None) or []
+    starts = _section_start_paragraph_indices(doc)
+    if not paragraphs or section_index < 0 or section_index >= len(starts):
+        return None
+    start = starts[section_index]
+    end = starts[section_index + 1] if section_index + 1 < len(starts) else len(paragraphs)
+    return start, end
+
+
+def _normalize_section_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _section_text_excerpt(text: str, limit: int = 18) -> str:
+    normalized = _normalize_section_text(text)
+    return normalized[:limit]
+
+
+def _find_nearby_section_text(doc, section_index: int) -> str:
+    starts = _section_start_paragraph_indices(doc)
+    for offset in range(1, 3):
+        next_index = section_index + offset
+        if next_index >= len(starts):
+            break
+        text = _section_leading_text(doc, next_index)
+        if text:
+            return text
+    return ""
+
+
+def _classify_section_name(text: str) -> str | None:
+    normalized = _normalize_section_text(text)
+    compact = normalized.replace(" ", "")
+    if not normalized:
+        return None
+    if "摘要" in compact:
+        return "中文摘要"
+    if normalized.startswith("Abstract") or normalized.startswith("ABSTRACT"):
+        return "英文摘要"
+    if "目录" in compact:
+        return "目录"
+    if "参考文献" in compact:
+        return "参考文献"
+    if "附录" in compact:
+        return "附录"
+    if "致谢" in compact:
+        return "致谢"
+    if "声明" in compact:
+        return "声明"
+    if normalized.startswith("第") and "章" in normalized[:6]:
+        return normalized[:18]
+    if re.match(r"^\d+(?:\.\d+)*\s*", normalized):
+        return f"{normalized[:18]}附近"
+    return None
+
+
+def _section_display_label(doc, section_index: int) -> str:
+    label = f"第{section_index + 1}个文档节"
+    leading_text = _section_leading_text(doc, section_index) or _find_nearby_section_text(doc, section_index)
+    if not leading_text:
+        return label
+
+    classified = _classify_section_name(leading_text)
+    if classified:
+        return f"{classified}（{label}）"
+
+    snippet = _section_text_excerpt(leading_text)
+    if snippet:
+        return f"{label}（{snippet}）"
+    return label
+
+
+def _section_summary_label(doc, section_index: int) -> str:
+    labels = _section_part_labels(doc, section_index)
+    if labels:
+        return labels[0]
+
+    leading_text = _section_leading_text(doc, section_index) or _find_nearby_section_text(doc, section_index)
+    if not leading_text:
+        return f"第{section_index + 1}个文档节"
+
+    classified = _classify_section_name(leading_text)
+    if classified:
+        return classified
+
+    snippet = _section_text_excerpt(leading_text)
+    if snippet:
+        return snippet
+    return f"第{section_index + 1}个文档节"
+
+
+def _section_part_labels(doc, section_index: int) -> list[str]:
+    span = _section_paragraph_span(doc, section_index)
+    if span is None:
+        return [f"第{section_index + 1}个文档节"]
+
+    start, end = span
+    paragraphs = getattr(doc, "paragraphs", None) or []
+    labels: list[str] = []
+    for paragraph in paragraphs[start:end]:
+        text = _paragraph_text(paragraph)
+        if not text:
+            continue
+
+        normalized = _normalize_section_text(text)
+        compact = normalized.replace(" ", "")
+
+        if _chapter_number_from_heading(text):
+            if len(normalized) <= 30 and not re.search(r"[，。；：,.!?;:]", normalized):
+                labels.append(normalized)
+            continue
+
+        appendix_letter = _appendix_letter_from_heading(text)
+        if appendix_letter:
+            labels.append(normalized)
+            continue
+
+        if compact in {"参考文献", "致谢", "目录", "摘要", "中文摘要", "摘 要", "Abstract", "ABSTRACT"}:
+            labels.append(_classify_section_name(normalized) or normalized)
+
+    labels = _unique_preserve_order(labels)
+    if labels:
+        return labels
+
+    leading_text = _section_leading_text(doc, section_index) or _find_nearby_section_text(doc, section_index)
+    classified = _classify_section_name(leading_text) if leading_text else None
+    if classified:
+        return [classified]
+
+    snippet = _section_text_excerpt(leading_text) if leading_text else ""
+    if snippet:
+        return [snippet]
+    return [f"第{section_index + 1}个文档节"]
+
+
+def _section_part_detail_labels(doc, section_index: int) -> list[str]:
+    section_label = f"第{section_index + 1}个文档节"
+    return [f"{label}（{section_label}）" for label in _section_part_labels(doc, section_index)]
+
+
+def _unique_preserve_order(items: list[str]) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        normalized = str(item or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(normalized)
+    return unique
 
 
 def _footer_page_number_nodes(section, doc, sections=None, section_index: int | None = None) -> list[dict]:
@@ -317,55 +654,49 @@ def _footer_page_number_nodes(section, doc, sections=None, section_index: int | 
             continue
 
         for page_para in page_paras:
-            style_id = None
-            align = None
-            text = ""
-            font_candidates: list[str] = []
-            size_half_points: int | None = None
             try:
-                style_values = page_para.xpath("./w:pPr/w:pStyle/@w:val", namespaces=_XML_NS)
-                if style_values:
-                    style_id = str(style_values[0])
-                align_values = page_para.xpath("./w:pPr/w:jc/@w:val", namespaces=_XML_NS)
-                if align_values:
-                    align = str(align_values[0]).lower()
-
-                text_tokens = page_para.xpath(".//w:t/text()", namespaces=_XML_NS)
-                text = "".join(str(token) for token in text_tokens).strip()
-
-                run_nodes = page_para.xpath("./w:r", namespaces=_XML_NS)
-                for run_node in run_nodes:
-                    font_values = run_node.xpath("./w:rPr/w:rFonts/@w:ascii | ./w:rPr/w:rFonts/@w:hAnsi", namespaces=_XML_NS)
-                    font_candidates.extend(str(value) for value in font_values if str(value).strip())
-                    size_values = run_node.xpath("./w:rPr/w:sz/@w:val", namespaces=_XML_NS)
-                    if size_values:
-                        try:
-                            size_half_points = int(size_values[0])
-                        except Exception:  # noqa: BLE001
-                            pass
+                node = _extract_para_style_snapshot(page_para, doc)
             except Exception:  # noqa: BLE001
                 continue
 
-            style = _style_by_id(doc, style_id)
-            if size_half_points is None and style is not None:
-                size_half_points = _style_font_size_half_points(style)
-
-            if not font_candidates and style is not None:
-                font_candidates.extend(_style_font_name_candidates(style))
-
-            node = {
-                "text": text or "页码域",
-                "align": align,
-                "style_id": style_id,
-                "font_candidates": font_candidates,
-                "size_half_points": size_half_points,
-            }
+            node["text"] = node["text"] or "页码域"
             key = (
                 node["text"],
                 node["align"],
                 node["style_id"],
                 tuple(node["font_candidates"]),
                 node["size_half_points"],
+                node["size_explicit"],
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            nodes.append(node)
+
+        try:
+            content_paras = root.xpath(".//w:txbxContent//w:p | self::w:p", namespaces=_XML_NS)
+        except Exception:  # noqa: BLE001
+            content_paras = []
+
+        for para_node in content_paras:
+            try:
+                instr = para_node.xpath(".//w:instrText/text()", namespaces=_XML_NS)
+                if instr:
+                    continue
+                node = _extract_para_style_snapshot(para_node, doc)
+            except Exception:  # noqa: BLE001
+                continue
+
+            if not _looks_like_plain_page_number_text(node["text"]):
+                continue
+
+            key = (
+                node["text"],
+                node["align"],
+                node["style_id"],
+                tuple(node["font_candidates"]),
+                node["size_half_points"],
+                node["size_explicit"],
             )
             if key in seen_keys:
                 continue
@@ -400,62 +731,20 @@ def _footer_text_nodes(section, doc, sections=None, section_index: int | None = 
                 instr = para_node.xpath(".//w:instrText/text()", namespaces=_XML_NS)
                 if any("PAGE" in str(item).upper() for item in instr):
                     continue
-
-                text_tokens = para_node.xpath(".//w:t/text()", namespaces=_XML_NS)
-                text = "".join(str(token) for token in text_tokens).strip()
-                if not text:
-                    continue
-
-                style_values = para_node.xpath("./w:pPr/w:pStyle/@w:val", namespaces=_XML_NS)
-                style_id = str(style_values[0]) if style_values else None
-                align_values = para_node.xpath("./w:pPr/w:jc/@w:val", namespaces=_XML_NS)
-                align = str(align_values[0]).lower() if align_values else None
-
-                font_candidates: list[str] = []
-                size_half_points: int | None = None
-                run_nodes = para_node.xpath("./w:r", namespaces=_XML_NS)
-                for run_node in run_nodes:
-                    run_text = "".join(str(token) for token in run_node.xpath("./w:t/text()", namespaces=_XML_NS)).strip()
-                    if not run_text:
-                        continue
-                    font_values = run_node.xpath("./w:rPr/w:rFonts/@w:ascii | ./w:rPr/w:rFonts/@w:hAnsi | ./w:rPr/w:rFonts/@w:eastAsia", namespaces=_XML_NS)
-                    font_candidates.extend(str(value) for value in font_values if str(value).strip())
-                    size_values = run_node.xpath("./w:rPr/w:sz/@w:val", namespaces=_XML_NS)
-                    if size_values:
-                        try:
-                            size_half_points = int(size_values[0])
-                        except Exception:  # noqa: BLE001
-                            pass
+                node = _extract_para_style_snapshot(para_node, doc)
             except Exception:  # noqa: BLE001
                 continue
 
-            style = _style_by_id(doc, style_id)
-            if size_half_points is None and style is not None:
-                style_size = getattr(getattr(style, "font", None), "size", None)
-                if style_size is not None:
-                    try:
-                        size_half_points = int(round(float(style_size.pt) * 2))
-                    except Exception:  # noqa: BLE001
-                        pass
+            if not node["text"] or _looks_like_plain_page_number_text(node["text"]):
+                continue
 
-            if not font_candidates and style is not None:
-                style_font = getattr(getattr(style, "font", None), "name", None)
-                if style_font:
-                    font_candidates.append(str(style_font))
-
-            node = {
-                "text": text,
-                "align": align,
-                "style_id": style_id,
-                "font_candidates": font_candidates,
-                "size_half_points": size_half_points,
-            }
             key = (
                 node["text"],
                 node["align"],
                 node["style_id"],
                 tuple(node["font_candidates"]),
                 node["size_half_points"],
+                node["size_explicit"],
             )
             if key in seen_keys:
                 continue
@@ -608,21 +897,28 @@ def _extract_citation_numbers(text: str) -> list[int]:
     return numbers
 
 
-def _collect_citation_occurrences(paragraphs) -> list[dict]:
+def _collect_citation_occurrences(paragraphs, *, require_superscript: bool = False) -> list[dict]:
     occurrences: list[dict] = []
     for paragraph_index, paragraph in enumerate(paragraphs or [], start=1):
         text = _paragraph_text(paragraph)
         if not text:
             continue
-        numbers = _extract_citation_numbers(text)
-        for number in numbers:
-            occurrences.append(
-                {
-                    "number": number,
-                    "text": text,
-                    "paragraph_index": paragraph_index,
-                }
-            )
+        for marker_text, run, _run_text in _iter_citation_runs(paragraph):
+            if _looks_like_example_citation_context(text, marker_text):
+                continue
+            is_superscript = _run_is_superscript(run)
+            if require_superscript and not is_superscript:
+                continue
+            for number in _extract_citation_numbers(marker_text):
+                occurrences.append(
+                    {
+                        "number": number,
+                        "text": text,
+                        "paragraph_index": paragraph_index,
+                        "marker": marker_text,
+                        "is_superscript": is_superscript,
+                    }
+                )
     return occurrences
 
 
@@ -635,6 +931,31 @@ def _extract_reference_entry_numbers(reference_entries: list[str]) -> tuple[dict
             unnumbered.append(entry)
             continue
         numbered[int(match.group(1))] = entry
+    return numbered, unnumbered
+
+
+def _extract_reference_entry_numbers_from_paragraphs(reference_paragraphs) -> tuple[dict[int, str], list[str]]:
+    numbered: dict[int, str] = {}
+    unnumbered: list[str] = []
+    auto_numbered_index = 0
+
+    for paragraph in reference_paragraphs or []:
+        text = _paragraph_text(paragraph)
+        if not text:
+            continue
+
+        match = re.match(r"^[\[［]\s*(\d+)\s*[\]］]\s*(.*)$", text)
+        if match:
+            numbered[int(match.group(1))] = text
+            continue
+
+        if _paragraph_has_numbering(paragraph):
+            auto_numbered_index += 1
+            numbered[auto_numbered_index] = text
+            continue
+
+        unnumbered.append(text)
+
     return numbered, unnumbered
 
 
@@ -667,6 +988,52 @@ def _split_reference_authors(text: str) -> list[str]:
             return segments
 
     return []
+
+
+def _reference_has_author_abbreviation(text: str) -> bool:
+    normalized = re.sub(r"[\s\u3000]+", " ", str(text or ""))
+    if re.search(r"(?:，|,)?\s*等(?:[\s，,.;；。]|$)", normalized):
+        return True
+    if re.search(r"(?:,?\s*)et\s+al\.?(?:[\s,.;:；。]|$)", normalized, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def _caption_title_text(text: str) -> tuple[str, str, str] | None:
+    match = re.match(r"^(图|表)\s*([A-Z]?\d+(?:[\.．\-－]\d+)*)(.*)$", str(text or "").strip())
+    if not match:
+        return None
+    kind, number, suffix = match.groups()
+    return kind, number, suffix or ""
+
+
+def _looks_like_caption_text(text: str) -> bool:
+    parsed = _caption_title_text(text)
+    if parsed is None:
+        return False
+
+    _, _, suffix = parsed
+    if not suffix.strip():
+        return True
+
+    title_text = suffix.strip()
+    normalized = re.sub(r"[\s\u3000]+", "", title_text)
+    if not normalized:
+        return False
+
+    if len(normalized) > 40:
+        return False
+
+    if re.search(r"[。！？!?]", normalized):
+        return False
+
+    if re.match(r"^(列出|列出了|给出|给出了|展示|展示了|说明|说明了|反映|反映了|表示|表示了|体现|体现了|验证|验证了|用于|可以|通过|采用|实现|描述)", normalized):
+        return False
+
+    if any(token in normalized for token in ("可以", "通过", "用于说明", "进行了", "如图", "如表")):
+        return False
+
+    return True
 
 
 def _create_format_checker(ctx: RuleContext) -> FormatChecker:
@@ -726,8 +1093,21 @@ def _header_footer_user_settings(ctx: RuleContext, key: str) -> dict:
 
 def _expected_font_size_pt(size_text: str | None, default_pt: float) -> float:
     checker = FormatChecker()
-    if size_text and size_text in checker.size_mapping:
-        return float(checker.size_mapping[size_text])
+    normalized = str(size_text or "").strip()
+    if normalized:
+        if normalized in checker.size_mapping:
+            return float(checker.size_mapping[normalized])
+
+        for option, value in checker.size_mapping.items():
+            if normalized == str(option).split("(", 1)[0].strip():
+                return float(value)
+
+        pt_match = re.search(r"(\d+(?:\.\d+)?)\s*pt", normalized, flags=re.IGNORECASE)
+        if pt_match:
+            try:
+                return float(pt_match.group(1))
+            except Exception:  # noqa: BLE001
+                pass
     return default_pt
 
 
@@ -1219,8 +1599,9 @@ class CitationReferenceConsistencyRule(BaseRule):
         if not reference_entries:
             return []
 
-        reference_number_map, unnumbered_entries = _extract_reference_entry_numbers(reference_entries)
-        citation_occurrences = _collect_citation_occurrences(main_text)
+        reference_number_map, unnumbered_entries = _extract_reference_entry_numbers_from_paragraphs(reference_paragraphs)
+        citation_occurrences = _collect_citation_occurrences(main_text, require_superscript=True)
+        loose_citation_occurrences = _collect_citation_occurrences(main_text, require_superscript=False)
         cited_numbers = [item["number"] for item in citation_occurrences]
 
         issues: list[Issue] = []
@@ -1237,6 +1618,25 @@ class CitationReferenceConsistencyRule(BaseRule):
                 )
 
         if not cited_numbers:
+            loose_numbers = [item["number"] for item in loose_citation_occurrences]
+            if loose_numbers:
+                content = "、".join(f"[{num}]" for num in sorted(set(loose_numbers))[:12])
+                _append_issue(
+                    issues,
+                    rule_id=f"{self.rule_id}.unconfirmed_citation",
+                    title="引文与参考文献",
+                    message=content,
+                    problem="正文中存在方括号编号，但未通过上标样式确认是否为正式引文",
+                    section="正文内容",
+                    content=content,
+                    metadata={
+                        "candidate_numbers": sorted(set(loose_numbers)),
+                        "original_content": content,
+                    },
+                    severity=Severity.INFO,
+                )
+                return issues
+
             _append_issue(
                 issues,
                 rule_id=f"{self.rule_id}.no_citation",
@@ -1358,6 +1758,8 @@ class CitationSuperscriptRule(BaseRule):
                 continue
 
             for marker_text, run, run_text in _iter_citation_runs(paragraph):
+                if _looks_like_example_citation_context(text, marker_text):
+                    continue
                 if _run_is_superscript(run):
                     continue
 
@@ -1406,7 +1808,8 @@ class ReferenceEntryFormatRule(BaseRule):
                 continue
 
             problems: list[str] = []
-            if not self._entry_pattern.match(text):
+            has_numbering = _paragraph_has_numbering(paragraph)
+            if not self._entry_pattern.match(text) and not has_numbering:
                 problems.append("参考文献序号可能未按数字加方括号表示")
             if not _is_left_flush(paragraph):
                 problems.append("参考文献序号可能未左顶格")
@@ -1454,9 +1857,11 @@ class ReferenceNumberSequenceRule(BaseRule):
             if not text:
                 continue
             match = re.match(r"^[\[［]\s*(\d+)\s*[\]］]", text)
-            if not match:
+            if match:
+                numbered_items.append((int(match.group(1)), text, index))
                 continue
-            numbered_items.append((int(match.group(1)), text, index))
+            if _paragraph_has_numbering(paragraph):
+                numbered_items.append((index, text, index))
 
         if len(numbered_items) <= 1:
             return []
@@ -1554,7 +1959,7 @@ class ReferenceAuthorCountRule(BaseRule):
             if not text:
                 continue
 
-            if re.search(r"(，等\b|,?\s*et\s+al\.?)", text, flags=re.IGNORECASE):
+            if _reference_has_author_abbreviation(text):
                 continue
 
             authors = _split_reference_authors(text)
@@ -2223,29 +2628,44 @@ class PageNumberFormatRule(BaseRule):
                 if not problems:
                     continue
 
-                key = (
-                    "；".join(problems),
-                    tuple(font_candidates),
-                    (node.get("align"),),
-                    size_half_points,
-                )
-                bucket = grouped.setdefault(
-                    key,
-                    {
-                        "sections": [],
-                        "node_indices": [],
-                        "font_candidates": font_candidates,
-                        "size_half_points": size_half_points,
-                        "problem": "；".join(problems),
-                    },
-                )
-                bucket["sections"].append(index)
-                bucket["node_indices"].append(node_index)
+                summary_labels = _section_part_labels(doc, index - 1)
+                detail_labels = _section_part_detail_labels(doc, index - 1)
+                if len(detail_labels) != len(summary_labels):
+                    detail_labels = [f"{label}（第{index}个文档节）" for label in summary_labels]
+
+                for summary_label, detail_label in zip(summary_labels, detail_labels):
+                    key = (
+                        summary_label,
+                        "；".join(problems),
+                        tuple(font_candidates),
+                        (node.get("align"),),
+                        size_half_points,
+                    )
+                    bucket = grouped.setdefault(
+                        key,
+                        {
+                            "sections": [],
+                            "section_summary_labels": [],
+                            "section_detail_labels": [],
+                            "node_indices": [],
+                            "font_candidates": font_candidates,
+                            "size_half_points": size_half_points,
+                            "problem": "；".join(problems),
+                        },
+                    )
+                    bucket["sections"].append(index)
+                    bucket["section_summary_labels"].append(summary_label)
+                    bucket["section_detail_labels"].append(detail_label)
+                    bucket["node_indices"].append(node_index)
 
         issues: list[Issue] = []
         for order, bucket in enumerate(grouped.values(), start=1):
-            sections_text = "、".join(f"第{item}章" for item in bucket["sections"])
-            content = f"{sections_text}页码域"
+            raw_summary_labels = bucket.get("section_summary_labels") or [f"第{item}个文档节" for item in bucket["sections"]]
+            raw_detail_labels = bucket.get("section_detail_labels") or raw_summary_labels
+            section_labels = _unique_preserve_order(raw_summary_labels)
+            detail_labels = _unique_preserve_order(raw_detail_labels)
+            primary_label = section_labels[0] if section_labels else "页码"
+            content = f"{primary_label}页码域"
             _append_issue(
                 issues,
                 rule_id=f"{self.rule_id}.{order}",
@@ -2256,6 +2676,9 @@ class PageNumberFormatRule(BaseRule):
                 content=content,
                 metadata={
                     "section_indices": bucket["sections"],
+                    "section_labels": section_labels,
+                    "section_detail_labels": detail_labels,
+                    "section_summary_label": primary_label,
                     "node_indices": bucket["node_indices"],
                     "font_candidates": bucket["font_candidates"],
                     "size_half_points": bucket["size_half_points"],
@@ -2321,22 +2744,31 @@ class FooterFormatRule(BaseRule):
                 if not problems:
                     continue
 
-                _append_issue(
-                    issues,
-                    rule_id=f"{self.rule_id}.{index}.{node_index}",
-                    title="页脚",
-                    message=str(node.get("text") or "页脚内容"),
-                    problem="；".join(problems),
-                    section="页脚",
-                    content=str(node.get("text") or "页脚内容"),
-                    metadata={
-                        "section_index": index,
-                        "node_index": node_index,
-                        "font_candidates": font_candidates,
-                        "size_half_points": size_half_points,
-                        "style_id": node.get("style_id"),
-                    },
-                )
+                part_labels = _section_part_labels(doc, index - 1)
+                part_detail_labels = _section_part_detail_labels(doc, index - 1)
+                if len(part_detail_labels) != len(part_labels):
+                    part_detail_labels = [f"{label}（第{index}个文档节）" for label in part_labels]
+
+                for part_label, detail_label in zip(part_labels, part_detail_labels):
+                    _append_issue(
+                        issues,
+                        rule_id=f"{self.rule_id}.{index}.{node_index}.{part_label}",
+                        title="页脚",
+                        message=f"{part_label}页脚内容",
+                        problem="；".join(problems),
+                        section="页脚",
+                        content=f"{part_label}页脚内容",
+                        metadata={
+                            "section_index": index,
+                            "section_summary_label": part_label,
+                            "section_detail_labels": [detail_label],
+                            "node_index": node_index,
+                            "font_candidates": font_candidates,
+                            "size_half_points": size_half_points,
+                            "style_id": node.get("style_id"),
+                            "original_text": str(node.get("text") or "页脚内容"),
+                        },
+                    )
 
         return issues
 
@@ -2446,54 +2878,87 @@ class HeaderFormatRule(BaseRule):
             if not meaningful:
                 continue
 
+            part_labels = _section_part_labels(doc, index - 1)
+            part_detail_labels = _section_part_detail_labels(doc, index - 1)
+            if len(part_detail_labels) != len(part_labels):
+                part_detail_labels = [f"{label}（第{index}个文档节）" for label in part_labels]
+
             for para_index, paragraph in enumerate(meaningful, start=1):
                 text = _paragraph_text(paragraph)
                 if text != expected_text:
-                    _append_issue(
-                        issues,
-                        rule_id=f"{self.rule_id}.text.{index}.{para_index}",
-                        title="页眉",
-                        message=text,
-                        problem="页眉内容可能不符合规范",
-                        section="页眉",
-                        content=text,
-                        metadata={"section_index": index, "paragraph_index": para_index},
-                    )
+                    for part_order, (part_label, detail_label) in enumerate(zip(part_labels, part_detail_labels), start=1):
+                        _append_issue(
+                            issues,
+                            rule_id=f"{self.rule_id}.text.{index}.{para_index}.{part_order}",
+                            title="页眉",
+                            message=f"{part_label}页眉内容",
+                            problem="页眉内容可能不符合规范",
+                            section="页眉",
+                            content=f"{part_label}页眉内容",
+                            metadata={
+                                "section_index": index,
+                                "section_summary_label": part_label,
+                                "section_detail_labels": [detail_label],
+                                "paragraph_index": para_index,
+                                "original_text": text,
+                            },
+                        )
 
                 actual_alignment = getattr(paragraph, "alignment", None)
                 if expected_align == "居中" and actual_alignment not in (None, WD_ALIGN_PARAGRAPH.CENTER):
-                    _append_issue(
-                        issues,
-                        rule_id=f"{self.rule_id}.align.{index}.{para_index}",
-                        title="页眉",
-                        message=text,
-                        problem="页眉可能未居中",
-                        section="页眉",
-                        content=text,
-                        metadata={"section_index": index, "paragraph_index": para_index},
-                    )
+                    for part_order, (part_label, detail_label) in enumerate(zip(part_labels, part_detail_labels), start=1):
+                        _append_issue(
+                            issues,
+                            rule_id=f"{self.rule_id}.align.{index}.{para_index}.{part_order}",
+                            title="页眉",
+                            message=f"{part_label}页眉内容",
+                            problem="页眉可能未居中",
+                            section="页眉",
+                            content=f"{part_label}页眉内容",
+                            metadata={
+                                "section_index": index,
+                                "section_summary_label": part_label,
+                                "section_detail_labels": [detail_label],
+                                "paragraph_index": para_index,
+                                "original_text": text,
+                            },
+                        )
                 elif expected_align == "左对齐" and actual_alignment not in (None, WD_ALIGN_PARAGRAPH.LEFT):
-                    _append_issue(
-                        issues,
-                        rule_id=f"{self.rule_id}.align.{index}.{para_index}",
-                        title="页眉",
-                        message=text,
-                        problem="页眉可能未左对齐",
-                        section="页眉",
-                        content=text,
-                        metadata={"section_index": index, "paragraph_index": para_index},
-                    )
+                    for part_order, (part_label, detail_label) in enumerate(zip(part_labels, part_detail_labels), start=1):
+                        _append_issue(
+                            issues,
+                            rule_id=f"{self.rule_id}.align.{index}.{para_index}.{part_order}",
+                            title="页眉",
+                            message=f"{part_label}页眉内容",
+                            problem="页眉可能未左对齐",
+                            section="页眉",
+                            content=f"{part_label}页眉内容",
+                            metadata={
+                                "section_index": index,
+                                "section_summary_label": part_label,
+                                "section_detail_labels": [detail_label],
+                                "paragraph_index": para_index,
+                                "original_text": text,
+                            },
+                        )
                 elif expected_align == "右对齐" and actual_alignment not in (None, WD_ALIGN_PARAGRAPH.RIGHT):
-                    _append_issue(
-                        issues,
-                        rule_id=f"{self.rule_id}.align.{index}.{para_index}",
-                        title="页眉",
-                        message=text,
-                        problem="页眉可能未右对齐",
-                        section="页眉",
-                        content=text,
-                        metadata={"section_index": index, "paragraph_index": para_index},
-                    )
+                    for part_order, (part_label, detail_label) in enumerate(zip(part_labels, part_detail_labels), start=1):
+                        _append_issue(
+                            issues,
+                            rule_id=f"{self.rule_id}.align.{index}.{para_index}.{part_order}",
+                            title="页眉",
+                            message=f"{part_label}页眉内容",
+                            problem="页眉可能未右对齐",
+                            section="页眉",
+                            content=f"{part_label}页眉内容",
+                            metadata={
+                                "section_index": index,
+                                "section_summary_label": part_label,
+                                "section_detail_labels": [detail_label],
+                                "paragraph_index": para_index,
+                                "original_text": text,
+                            },
+                        )
 
                 font_problem = False
                 size_problem = False
@@ -2508,27 +2973,41 @@ class HeaderFormatRule(BaseRule):
                         size_problem = True
 
                 if font_problem:
-                    _append_issue(
-                        issues,
-                        rule_id=f"{self.rule_id}.font.{index}.{para_index}",
-                        title="页眉",
-                        message=text,
-                        problem=f"页眉字体可能不是{expected_font}",
-                        section="页眉",
-                        content=text,
-                        metadata={"section_index": index, "paragraph_index": para_index},
-                    )
+                    for part_order, (part_label, detail_label) in enumerate(zip(part_labels, part_detail_labels), start=1):
+                        _append_issue(
+                            issues,
+                            rule_id=f"{self.rule_id}.font.{index}.{para_index}.{part_order}",
+                            title="页眉",
+                            message=f"{part_label}页眉内容",
+                            problem=f"页眉字体可能不是{expected_font}",
+                            section="页眉",
+                            content=f"{part_label}页眉内容",
+                            metadata={
+                                "section_index": index,
+                                "section_summary_label": part_label,
+                                "section_detail_labels": [detail_label],
+                                "paragraph_index": para_index,
+                                "original_text": text,
+                            },
+                        )
                 elif size_problem:
-                    _append_issue(
-                        issues,
-                        rule_id=f"{self.rule_id}.size.{index}.{para_index}",
-                        title="页眉",
-                        message=text,
-                        problem=f"页眉字号可能不是{expected.get('size') or '五号'}",
-                        section="页眉",
-                        content=text,
-                        metadata={"section_index": index, "paragraph_index": para_index},
-                    )
+                    for part_order, (part_label, detail_label) in enumerate(zip(part_labels, part_detail_labels), start=1):
+                        _append_issue(
+                            issues,
+                            rule_id=f"{self.rule_id}.size.{index}.{para_index}.{part_order}",
+                            title="页眉",
+                            message=f"{part_label}页眉内容",
+                            problem=f"页眉字号可能不是{expected.get('size') or '五号'}",
+                            section="页眉",
+                            content=f"{part_label}页眉内容",
+                            metadata={
+                                "section_index": index,
+                                "section_summary_label": part_label,
+                                "section_detail_labels": [detail_label],
+                                "paragraph_index": para_index,
+                                "original_text": text,
+                            },
+                        )
 
         return issues
 
@@ -2539,7 +3018,7 @@ class CaptionFormatRule(BaseRule):
     spec_ref = "撰写规范（16）（17）表格与图"
     engine = "docx"
 
-    _caption_pattern = re.compile(r"^(图|表)\s*([A-Z]?\d+(?:[\.．]\d+)*)(\s*)(.*)$")
+    _caption_pattern = re.compile(r"^(图|表)\s*([A-Z]?\d+(?:[\.．\-－]\d+)*)(\s*)(.*)$")
     _table_title_punctuation = re.compile(r"[，。！？；：、,.!?;:()\[\]【】《》<>“”\"'‘’·—\-]")
 
     def check(self, ctx: RuleContext) -> list[Issue]:
@@ -2570,6 +3049,8 @@ class CaptionFormatRule(BaseRule):
 
             match = self._caption_pattern.match(text)
             if not match:
+                continue
+            if not _looks_like_caption_text(text):
                 continue
 
             kind, number, spacing, title_text = match.groups()

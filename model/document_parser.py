@@ -414,4 +414,22 @@ class DocumentParser:
 
     @staticmethod
     def _is_figure_or_table_title(text):
-        return bool(re.match(r"^(图|表)\s*\d+([\.．]\d+)*", text))
+        raw = (text or "").strip()
+        match = re.match(r"^(图|表)\s*\d+(?:[\.．]\d+)*(.*)$", raw)
+        if not match:
+            return False
+
+        title_text = (match.group(2) or "").strip()
+        if not title_text:
+            return True
+
+        normalized = re.sub(r"[\s\u3000]+", "", title_text)
+        if not normalized or len(normalized) > 40:
+            return False
+        if re.search(r"[。！？!?]", normalized):
+            return False
+        if re.match(r"^(列出|列出了|给出|给出了|展示|展示了|说明|说明了|反映|反映了|表示|表示了|体现|体现了|验证|验证了|用于|可以|通过|采用|实现|描述)", normalized):
+            return False
+        if any(token in normalized for token in ("可以", "通过", "用于说明", "进行了", "如图", "如表")):
+            return False
+        return True

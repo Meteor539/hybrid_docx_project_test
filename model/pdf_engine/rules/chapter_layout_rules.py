@@ -3,7 +3,7 @@ import re
 from model.core.base_rule import BaseRule
 from model.core.context import RuleContext
 from model.core.issue import Issue, Severity, Source
-from model.pdf_engine.page_roles import is_catalogue_page, normalize_text
+from model.pdf_engine.page_roles import is_catalogue_page, normalize_text, page_has_top_heading
 
 
 def _iter_text_lines(page):
@@ -80,9 +80,45 @@ def _is_chapter_heading_text(text: str) -> bool:
 
 
 def _chapter_heading_lines(page):
-    for line in _iter_text_lines(page):
+    lines = list(_iter_text_lines(page))
+    for idx, line in enumerate(lines):
         if _is_chapter_heading_text(line["text"]):
             yield line
+            continue
+
+        compact = normalize_text(line["text"])
+        if not re.fullmatch(r"第[一二三四五六七八九十百千0123456789]+章", compact):
+            continue
+
+        if idx + 1 >= len(lines):
+            continue
+
+        next_line = lines[idx + 1]
+        next_compact = normalize_text(next_line["text"])
+        if not next_compact or len(next_compact) > 30:
+            continue
+        if re.search(r"[，。；：！？!?]", next_compact):
+            continue
+
+        current_box = line["bbox"]
+        next_box = next_line["bbox"]
+        gap = float(next_box[1]) - float(current_box[3])
+        page_height = float(getattr(page, "height", 0.0) or 0.0)
+        max_gap = max(18.0, page_height * 0.025) if page_height > 0 else 18.0
+        if gap < -2.0 or gap > max_gap:
+            continue
+
+        merged = {
+            "text": f"{compact}{next_compact}",
+            "bbox": [
+                min(current_box[0], next_box[0]),
+                min(current_box[1], next_box[1]),
+                max(current_box[2], next_box[2]),
+                max(current_box[3], next_box[3]),
+            ],
+        }
+        if _is_chapter_heading_text(merged["text"]):
+            yield merged
 
 
 def _has_substantial_text_before_heading(page, heading_top: float, page_height: float) -> bool:
@@ -115,7 +151,10 @@ class ChapterStartsNewPagePdfRule(BaseRule):
 
         issues: list[Issue] = []
         for page in pages:
-            if is_catalogue_page(page):
+            if page_has_top_heading(page, ("目录", "目次")) or is_catalogue_page(page):
+                if not list(_chapter_heading_lines(page)):
+                    continue
+            if page_has_top_heading(page, ("目录", "目次")):
                 continue
 
             page_no = getattr(page, "page_no", None)

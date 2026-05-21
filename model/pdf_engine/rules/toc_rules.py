@@ -56,6 +56,34 @@ def _body_has_level3_headings(docx_sections) -> bool:
     return False
 
 
+def _docx_catalogue_has_level3_entries(docx_sections) -> bool:
+    sections = docx_sections or {}
+    if not isinstance(sections, dict):
+        return False
+
+    catalogue = sections.get("catalogue", {})
+    if not isinstance(catalogue, dict):
+        return False
+
+    for paragraph in catalogue.get("content") or []:
+        text = str(getattr(paragraph, "text", "") or "").strip()
+        if re.match(r"^\d+\.\d+\.\d+", text):
+            return True
+    return False
+
+
+def _pdf_catalogue_has_level3_entries(catalogue_text: str) -> bool:
+    if not catalogue_text:
+        return False
+
+    normalized_catalogue_text = re.sub(r"[\u3000\t ]+", "", catalogue_text)
+    if re.search(r"^\s*\d+\.\d+\.\d+", normalized_catalogue_text, flags=re.MULTILINE):
+        return True
+
+    # 有些 PDF 提取会把目录行合并，导致三级条目不再位于“行首”。
+    return bool(re.search(r"(?<!\d)\d+\.\d+\.\d+(?!\d)", normalized_catalogue_text))
+
+
 class TocPresencePdfRule(BaseRule):
     rule_id = "toc.exists_and_match"
     display_name = "TOC presence (pdf)"
@@ -95,13 +123,15 @@ class TocLevelPresentationPdfRule(BaseRule):
         if not _body_has_level3_headings(ctx.docx_sections):
             return []
 
+        if _docx_catalogue_has_level3_entries(ctx.docx_sections):
+            return []
+
         catalogue_pages = _collect_catalogue_pages(pages)
         if not catalogue_pages:
             return []
 
         catalogue_text = "\n".join(getattr(page, "text", "") for page in catalogue_pages)
-        normalized_catalogue_text = re.sub(r"[\u3000\t ]+", "", catalogue_text)
-        if re.search(r"^\s*\d+\.\d+\.\d+", normalized_catalogue_text, flags=re.MULTILINE):
+        if _pdf_catalogue_has_level3_entries(catalogue_text):
             return []
 
         page_nos = [str(getattr(page, "page_no", "")) for page in catalogue_pages if getattr(page, "page_no", None) is not None]
