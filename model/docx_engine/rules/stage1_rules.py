@@ -71,6 +71,21 @@ def _count_non_whitespace_chars(text: str) -> int:
     return len(re.sub(r"\s+", "", text or ""))
 
 
+def _count_thesis_title_units(text: str) -> int:
+    """按论文题目常用计字方式统计：汉字逐字计 1，连续英文/数字计 1 个词。"""
+    compact = re.sub(r"\s+", "", text or "")
+    if not compact:
+        return 0
+
+    count = 0
+    for match in re.finditer(
+        r"[\u4e00-\u9fff\u3400-\u4dbf]|[A-Za-z0-9]+(?:[-._][A-Za-z0-9]+)*",
+        compact,
+    ):
+        count += 1
+    return count
+
+
 def _join_paragraph_texts(paragraphs) -> str:
     joined = "\n".join(_paragraph_text(p) for p in _flatten_paragraphs(paragraphs) if _paragraph_text(p))
     return joined.strip()
@@ -218,8 +233,8 @@ class CoverTitleLengthRule(BaseRule):
         if not title_text:
             return []
 
-        # 以非空白字符计数，适配中文题目场景。
-        char_count = len(re.sub(r"\s+", "", title_text))
+        # 汉字按字计，连续英文/数字按一个词计（避免英文单词被逐字母累计）。
+        char_count = _count_thesis_title_units(title_text)
         if char_count <= 25:
             return []
 
@@ -227,7 +242,7 @@ class CoverTitleLengthRule(BaseRule):
             Issue(
                 rule_id=self.rule_id,
                 title="封面",
-                message=f"{title_text}；长度约为 {char_count} 个非空白字符。",
+                message=f"{title_text}；长度约为 {char_count} 字。",
                 severity=Severity.WARNING,
                 source=Source.DOCX,
                 page=1,

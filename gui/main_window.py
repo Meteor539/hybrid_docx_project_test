@@ -1022,7 +1022,7 @@ class MainWindow(QMainWindow):
         self.result_layout.addWidget(overview_widget)
 
         if not issues:
-            no_issue_label = QLabel("未发现格式问题，但混合检查链路已执行。")
+            no_issue_label = QLabel("混合检查链路已执行，未发现格式问题。")
             no_issue_label.setStyleSheet("color: green; font-weight: bold; font-size: 14px;")
             no_issue_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             self.result_layout.addWidget(no_issue_label)
